@@ -14,7 +14,7 @@ VALUE ArchiveEntry_alloc(VALUE self)
 	return wrap(archive_entry_new());
 }
 
-/* TODO funktioniert nicht
+/* TODO does not work
 VALUE ArchiveEntry_initialize_copy(VALUE self,VALUE source)
 {
 	VALUE result = rb_call_super(1,&source);
@@ -99,7 +99,7 @@ VALUE ArchiveEntry_set_uname(VALUE self,VALUE val)
 
 
 
-VALUE ArchiveEntry_pathname(VALUE self)
+VALUE ArchiveEntry_path(VALUE self)
 {
 	const char* str = archive_entry_pathname(_self);
 	return str ==NULL? Qnil : rb_str_new2(str);
@@ -129,7 +129,7 @@ VALUE ArchiveEntry_symlink(VALUE self)
 	return str ==NULL? Qnil : rb_str_new2(str);
 }
 
-VALUE ArchiveEntry_set_pathname(VALUE self,VALUE val)
+VALUE ArchiveEntry_set_path(VALUE self,VALUE val)
 {
 	archive_entry_set_pathname(_self,rb_string_value_cstr(&val));
 	return val;
@@ -249,7 +249,17 @@ VALUE ArchiveEntry_compare(VALUE self,VALUE other)
 	}
 }
 
-//ACL struff wird später mit acl gem gekoppelt
+
+VALUE ArchiveEntry_inspect(VALUE self){
+		VALUE array[3];
+		array[0]=rb_str_new2("#<%s:%s>");
+		array[1]=rb_class_of(self);	
+		array[2]=ArchiveEntry_path(self);
+		return rb_f_sprintf(3,array);
+}
+
+
+//ACL added later with acl gem
 
 VALUE ArchiveEntry_acl(VALUE self){
 	archive_entry_acl_reset(_self,ARCHIVE_ENTRY_ACL_TYPE_ACCESS);
@@ -271,12 +281,11 @@ VALUE ArchiveEntry_acl_add(VALUE self){
 	return self;
 }
 
-
-
 void Init_archive_entry(VALUE m){
 	rb_cArchiveEntry = rb_define_class_under(m,"Entry",rb_cObject);
 	rb_define_alloc_func(rb_cArchiveEntry,ArchiveEntry_alloc);
 	//rb_define_private_method(rb_cArchiveEntry,"initialize_copy",RUBY_METHOD_FUNC(ArchiveEntry_initialize_copy),1);
+	rb_define_method(rb_cArchiveEntry,"inspect",RUBY_METHOD_FUNC(ArchiveEntry_inspect),0);
 	
 	rb_define_method(rb_cArchiveEntry,"gname",RUBY_METHOD_FUNC(ArchiveEntry_gname),0);
 	rb_define_method(rb_cArchiveEntry,"uname",RUBY_METHOD_FUNC(ArchiveEntry_uname),0);
@@ -288,12 +297,12 @@ void Init_archive_entry(VALUE m){
 	rb_define_method(rb_cArchiveEntry,"gid=",RUBY_METHOD_FUNC(ArchiveEntry_set_gid),1);
 	rb_define_method(rb_cArchiveEntry,"uid=",RUBY_METHOD_FUNC(ArchiveEntry_set_uid),1);
 
-	rb_define_method(rb_cArchiveEntry,"pathname",RUBY_METHOD_FUNC(ArchiveEntry_pathname),0);
+	rb_define_method(rb_cArchiveEntry,"path",RUBY_METHOD_FUNC(ArchiveEntry_path),0);
 	rb_define_method(rb_cArchiveEntry,"symlink",RUBY_METHOD_FUNC(ArchiveEntry_symlink),0);
 	rb_define_method(rb_cArchiveEntry,"hardlink",RUBY_METHOD_FUNC(ArchiveEntry_hardlink),0);
 	rb_define_method(rb_cArchiveEntry,"sourcepath",RUBY_METHOD_FUNC(ArchiveEntry_sourcepath),0);
 
-	rb_define_method(rb_cArchiveEntry,"pathname=",RUBY_METHOD_FUNC(ArchiveEntry_set_pathname),1);
+	rb_define_method(rb_cArchiveEntry,"path=",RUBY_METHOD_FUNC(ArchiveEntry_set_path),1);
 	rb_define_method(rb_cArchiveEntry,"symlink=",RUBY_METHOD_FUNC(ArchiveEntry_set_symlink),1);
 	rb_define_method(rb_cArchiveEntry,"hardlink=",RUBY_METHOD_FUNC(ArchiveEntry_set_hardlink),1);
 
