@@ -20,12 +20,12 @@ allows you to alter arbitrary archives.
 DESCRIPTION
   s.version = "0.0.1.dev"
   s.author = "Hanmac"
-  s.email = "your@email.mobi"
+  s.email = "hanmac@gmx.de"
   s.platform = Gem::Platform::RUBY
   s.required_ruby_version = ">=1.9"
   #s.add_dependency("term-ansicolor", ">= 2.0.0")
   #s.add_development_dependency("rdoc", ">= 3")
-  s.requirements = ["A C compiler", "libarchive library"]
+  s.requirements = ["A C++ compiler", "libarchive library"]
   s.files = ["README.rdoc", Dir["ext/*.cpp"], Dir["ext/*.hpp"], Dir["ext/*.rb"], Dir["lib/**/*.rb"]].flatten
   s.extensions << "ext/extconf.rb"
   s.has_rdoc = true
@@ -43,10 +43,10 @@ Rake::RDocTask.new do |rd|
   rd.rdoc_dir = "doc"
 end
 
-#Rake::TestTask.new("test") do |t|
-#  t.pattern = "test/test_*.rb"
-#  t.warning = true
-#end
+Rake::TestTask.new("test") do |t|
+  t.pattern = "test/test_*.rb"
+  t.warning = true
+end
 
 desc "Compiles libarchive-ruby, outputting ext/archive.so"
 task :compile do
