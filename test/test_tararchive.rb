@@ -8,14 +8,14 @@ class Test_TarArchive < Test::Unit::TestCase
 
 	class << self
 		def startup
-			Dir.chdir("test")
+			#Dir.chdir("test")
 			path = "neue/neue Datei"
 			archive = Archive.new(File.join("test","neue.tar.bz2"))
-			archive.extract(path)
+			archive.extract(path,extract: Archive::EXTRACT_TIME | Archive::EXTRACT_OWNER)
 		end
 
 		def shutdown
-			Dir.chdir("..")
+			#Dir.chdir("..")
 		end
 	end
 	def test_format
