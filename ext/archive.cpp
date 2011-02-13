@@ -119,7 +119,7 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 	
 	rb_scan_args(argc, argv, "01", &opts);
 	if(rb_obj_is_kind_of(opts,rb_cHash))
-		if(RTEST(temp=rb_hash_aref(opts,ID2SYM("extract"))))
+		if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("extract")))))
 			extract_opt = NUM2INT(temp);
 	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
@@ -353,7 +353,6 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
-	int i = 0;
 	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,fd,error;
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
@@ -438,7 +437,7 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 	//*
 	if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
 		//write old data back
-		for(i=0; i<entries.size(); i++){
+		for(int i=0; i<entries.size(); i++){
 			if(std::string(rb_string_value_cstr(&pathname)).compare(archive_entry_pathname(entries[i]))!=0){
 				archive_write_header(b,entries[i]);
 				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
@@ -471,6 +470,7 @@ VALUE Archive_delete(VALUE self,VALUE val)
 	size_t bytes_read;
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
 	
@@ -503,6 +503,63 @@ VALUE Archive_delete(VALUE self,VALUE val)
 		}
 		archive_read_finish(a);
 	}
+	//detect format and compression from filename
+	if(format == ARCHIVE_FORMAT_EMPTY){
+		if(selfpath.substr(selfpath.length()-7).compare(".tar.xz")==0){
+			format=ARCHIVE_FORMAT_TAR_USTAR;
+			compression=ARCHIVE_COMPRESSION_XZ;
+		}else if(selfpath.substr(selfpath.length()-9).compare(".tar.lzma")==0){
+			format=ARCHIVE_FORMAT_TAR_USTAR;
+			compression=ARCHIVE_COMPRESSION_LZMA;
+		}else if(selfpath.substr(selfpath.length()-7).compare(".tar.gz")==0){
+			format=ARCHIVE_FORMAT_TAR_USTAR;
+			compression=ARCHIVE_COMPRESSION_GZIP;
+		}else if(selfpath.substr(selfpath.length()-8).compare(".tar.bz2")==0){
+			format=ARCHIVE_FORMAT_TAR_USTAR;
+			compression=ARCHIVE_COMPRESSION_BZIP2;
+		}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
+			format=ARCHIVE_FORMAT_TAR_USTAR;
+	}
+	//format fix
+	if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
+		format=ARCHIVE_FORMAT_TAR_USTAR;
+	
+	//TODO add archive-error
+	if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
+		rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+	switch(compression){
+	case ARCHIVE_COMPRESSION_NONE:
+		error = archive_write_set_compression_none(b);
+		break;
+	case ARCHIVE_COMPRESSION_GZIP:
+		error = archive_write_set_compression_gzip(b);
+		break;
+	case ARCHIVE_COMPRESSION_BZIP2:
+		error = archive_write_set_compression_bzip2(b);
+		break;
+	case ARCHIVE_COMPRESSION_COMPRESS:
+		error = archive_write_set_compression_compress(b);
+		break;
+	case ARCHIVE_COMPRESSION_LZMA:
+		error = archive_write_set_compression_lzma(b);
+		break;
+	case ARCHIVE_COMPRESSION_XZ:
+		error = archive_write_set_compression_xz(b);
+		break;
+	case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
+	case ARCHIVE_COMPRESSION_RPM:
+		rb_raise(rb_eStandardError,"unsupported compresstype");
+		break;	
+	}
+	
+	if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
+		//write old data back
+		for(int i=0; i<entries.size(); i++){
+			archive_write_header(b,entries[i]);
+			archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
+			archive_write_finish_entry(b);
+		}
+	}
 	return self;
 }
 //*/
@@ -514,6 +571,7 @@ VALUE Archive_delete_if(VALUE self)
 	size_t bytes_read;
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
 	
@@ -585,12 +643,10 @@ VALUE Archive_delete_if(VALUE self)
 	
 	if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
 		//write old data back
-		for(i=0; i<entries.size(); i++){
-			if(std::string(rb_string_value_cstr(&pathname)).compare(archive_entry_pathname(entries[i]))!=0){
-				archive_write_header(b,entries[i]);
-				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
-				archive_write_finish_entry(b);
-			}
+		for(int i=0; i<entries.size(); i++){
+			archive_write_header(b,entries[i]);
+			archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
+			archive_write_finish_entry(b);
 		}
 	}
 	return self;
@@ -639,7 +695,7 @@ extern "C" void Init_archive(void){
 	
 	rb_define_method(rb_cArchive,"delete",RUBY_METHOD_FUNC(Archive_delete),1);
 	rb_define_method(rb_cArchive,"delete_if",RUBY_METHOD_FUNC(Archive_delete_if),0);
-//	rb_define_method(rb_cArchive,"move_to",RUBY_METHOD_FUNC(Archive_move_to),1);	
+	rb_define_method(rb_cArchive,"move_to",RUBY_METHOD_FUNC(Archive_move_to),1);	
 
 	//rb_define_method(rb_cArchive,"clear",RUBY_METHOD_FUNC(Archive_clear),0);
 		
