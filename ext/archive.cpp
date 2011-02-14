@@ -16,6 +16,14 @@ VALUE Archive_initialize_copy(VALUE self, VALUE other)
 	_self->path = std::string(wrap<rarchive*>(other)->path.c_str());
 	return result;
 }
+
+/*
+ * call-seq:
+ * Archive.new(path) -> archive
+ *
+ * makes a new Archive object.
+ */
+ 
 VALUE Archive_initialize(VALUE self,VALUE path)
 {
 	path = rb_file_s_expand_path(1,&path);
@@ -23,12 +31,25 @@ VALUE Archive_initialize(VALUE self,VALUE path)
 	return self;
 }
 
+/*
+ * call-seq:
+ * archive.path -> String
+ *
+ * returns path of Archive
+ */
 
 VALUE Archive_path(VALUE self)
 {
 	return rb_str_new2(_self->path.c_str());
 }
 
+/*
+ * call-seq:
+ * archive.each {|entry[,data] } -> Array
+ * archive.each -> Enumerator
+ *
+ * returns path of Archive
+ */
 
 VALUE Archive_each(VALUE self)
 {
@@ -51,7 +72,48 @@ VALUE Archive_each(VALUE self)
 	return result;
 }
 
+/*
+ * call-seq:
+ * archive[name] -> Archive::Entry or nil
+ *
+ * returns an archive entry or nil. name chould be String or Regex.
+ */
 
+VALUE Archive_get(VALUE self,VALUE val)
+{
+	struct archive *a = archive_read_new();
+	struct archive_entry *entry;
+	archive_read_support_compression_all(a);
+	archive_read_support_format_all(a);
+	archive_read_support_format_raw(a);
+	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+			bool find = false;
+			if(rb_obj_is_kind_of(val,rb_cString)==Qtrue){
+				std::string str1(rb_string_value_cstr(&val)),str2(str1);
+				str2 += '/'; // dir ends of '/'
+				const char *cstr = archive_entry_pathname(entry);
+				find = (str1.compare(cstr)==0 || str2.compare(cstr)==0);
+			}else if(rb_obj_is_kind_of(val,rb_cRegexp)==Qtrue){
+				find = rb_reg_match(val,rb_str_new2(archive_entry_pathname(entry)))!=Qnil;
+			}
+			if(find)
+				return wrap(entry);
+		}
+		archive_read_finish(a);
+	}
+	return Qnil;
+}
+/*
+ * call-seq:
+ * archive.extract([name],[opt]) -> Array
+ *
+ * extract files
+ * name could be an entry, a String and a Regex. 
+ * opt is an option hash.
+ *
+ * :extract => flag, Integer combined of the Archive::Extract constants
+ */
 
 VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 {
@@ -106,6 +168,17 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 	return result;
 }
 
+/*
+ * call-seq:
+ * archive.extract_if([opt]) {|entry| }  -> Array
+ * archive.extract_if([opt])  -> Enumerator
+ *
+ * extract files
+ * opt is an option hash.
+ *
+ * :extract => flag, Integer combined of the Archive::Extract constants
+ */
+
 VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 {
 	RETURN_ENUMERATOR(self,argc,argv);
@@ -133,11 +206,14 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 	}
 	return result;
 }
-//*
-//TODO: archiv to archiv does not work
+
+/*
+ * 
+ */
 
 VALUE Archive_move_to(VALUE self,VALUE other)
 {
+	//TODO: archiv to archiv does not work
 	VALUE result = rb_ary_new(),to_archive;
 	struct archive *a = archive_read_new();
 	struct archive *b = archive_write_new();
@@ -162,6 +238,13 @@ VALUE Archive_move_to(VALUE self,VALUE other)
 	}
 }
 
+/*
+ * call-seq:
+ * archive.format -> Integer or nil
+ *
+ * returns the archive format as Integer.
+ */
+
 VALUE Archive_format(VALUE self)
 {
 	struct archive *a = archive_read_new();
@@ -177,6 +260,13 @@ VALUE Archive_format(VALUE self)
 	}
 	return result;
 }
+
+/*
+ * call-seq:
+ * archive.compression -> Integer or nil
+ *
+ * returns the archive compression as Integer.
+ */
 
 VALUE Archive_compression(VALUE self)
 {
@@ -194,6 +284,13 @@ VALUE Archive_compression(VALUE self)
 	return result;
 }
 
+/*
+ * call-seq:
+ * archive.format_name -> String or nil
+ *
+ * returns the archive format as String.
+ */
+ 
 VALUE Archive_format_name(VALUE self)
 {
 	struct archive *a = archive_read_new();
@@ -210,21 +307,35 @@ VALUE Archive_format_name(VALUE self)
 	return name ? rb_str_new2(name) : Qnil	;
 }
 
+/*
+ * call-seq:
+ * archive.compression_name -> String or nil
+ *
+ * returns the archive compression as String.
+ */
+
 VALUE Archive_compression_name(VALUE self)
 {
 	struct archive *a = archive_read_new();
 	struct archive_entry *entry;
-	VALUE result;
+	const char* name = NULL;
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
-		result = rb_str_new2(archive_compression_name(a));
+		name = archive_compression_name(a);
 		archive_read_finish(a);
 	}
-	return result;
+	return name ? rb_str_new2(name) : Qnil	;
 }
+
+/*
+ * call-seq:
+ * archive.add(obj,pathname) -> self
+ *
+ * adds a file, possible parameter are string as path,IO and File object.
+ */
 
 VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 {
@@ -339,7 +450,13 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		close(fd);
 	return self;
 }
-//*/
+
+/*
+ * call-seq:
+ * archive << obj -> self
+ *
+ * adds a file, possible parameter are string as path and File object.
+ */
 VALUE Archive_add_shift(VALUE self,VALUE name)
 {
 	VALUE pathname;
@@ -434,7 +551,7 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 		break;	
 	}
 	
-	//*
+
 	if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
 		//write old data back
 		for(int i=0; i<entries.size(); i++){
@@ -457,11 +574,18 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 		archive_read_finish(c);
 		archive_write_finish(b);
 	}
-	//*/
 	if(rb_obj_is_kind_of(name,rb_cString))
 		close(fd);
 	return self;
 }
+
+/*
+ * call-seq:
+ * archive.delete(name) -> Array
+ *
+ * extract files
+ * name could be an entry, a String and a Regex.
+ */
 
 VALUE Archive_delete(VALUE self,VALUE val)
 {
@@ -559,10 +683,19 @@ VALUE Archive_delete(VALUE self,VALUE val)
 			archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
 			archive_write_finish_entry(b);
 		}
+		archive_write_finish(b);
 	}
 	return self;
 }
-//*/
+
+/*
+ * call-seq:
+ * archive.delete_if {|entry| } -> self
+ * archive.delete_if -> Enumerator
+ *
+ * deletes entries from a archive if the block returns not false or nil
+ */
+
 VALUE Archive_delete_if(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
@@ -648,32 +781,162 @@ VALUE Archive_delete_if(VALUE self)
 			archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
 			archive_write_finish_entry(b);
 		}
+		archive_write_finish(b);
 	}
+
 	return self;
 }
+
+/*
+ * call-seq:
+ * archive.clear -> self
+ *
+ * clear the archiv
+ */
+
+VALUE Archive_clear(VALUE self)
+{
+
+	std::string selfpath =_self->path;
+
+	struct archive *a = archive_read_new(),*b=archive_write_new();
+	struct archive_entry *entry;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error;
+	
+	archive_read_support_compression_all(a);
+	archive_read_support_format_all(a);
+	archive_read_support_format_raw(a);
+	//autodetect format and compression
+	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+		archive_read_next_header(a, &entry);
+		format = archive_format(a);
+		compression = archive_compression(a);
+		archive_read_finish(a);
+	
+		//format fix
+		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
+			format=ARCHIVE_FORMAT_TAR_USTAR;
+	
+		//TODO add archive-error
+		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
+			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+		switch(compression){
+		case ARCHIVE_COMPRESSION_NONE:
+			error = archive_write_set_compression_none(b);
+			break;
+		case ARCHIVE_COMPRESSION_GZIP:
+			error = archive_write_set_compression_gzip(b);
+			break;
+		case ARCHIVE_COMPRESSION_BZIP2:
+			error = archive_write_set_compression_bzip2(b);
+			break;
+		case ARCHIVE_COMPRESSION_COMPRESS:
+			error = archive_write_set_compression_compress(b);
+			break;
+		case ARCHIVE_COMPRESSION_LZMA:
+			error = archive_write_set_compression_lzma(b);
+			break;
+		case ARCHIVE_COMPRESSION_XZ:
+			error = archive_write_set_compression_xz(b);
+			break;
+		case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
+		case ARCHIVE_COMPRESSION_RPM:
+			rb_raise(rb_eStandardError,"unsupported compresstype");
+			break;	
+		}
+		if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK)
+			archive_write_finish(b);
+	}
+	
+	return self;
+}
+
+
+
+
+/*
+ * call-seq:
+ * archive.exist? -> true or false
+ *
+ * call the File.exist?(path)
+ */
 
 VALUE Archive_exist(VALUE self)
 {
 	return rb_funcall(rb_cFile,rb_intern("exist?"),1,Archive_path(self));
 }
+
+/*
+ * call-seq:
+ * archive.unlink -> self
+ *
+ * call the File.unlink(path)
+ */
+
+VALUE Archive_unlink(VALUE self)
+{
+	return rb_funcall(rb_cFile,rb_intern("unlink"),1,Archive_path(self));
+	return self;
+}
+
+/*
+ * call-seq:
+ * archive.mtime -> Time
+ *
+ * call the File.mtime(path)
+ */
+
 VALUE Archive_mtime(VALUE self)
 {
 	return rb_funcall(rb_cFile,rb_intern("mtime"),1,Archive_path(self));
 }
+
+/*
+ * call-seq:
+ * archive.atime -> Time
+ *
+ * call the File.atime(path)
+ */
+
 VALUE Archive_atime(VALUE self)
 {
 	return rb_funcall(rb_cFile,rb_intern("atime"),1,Archive_path(self));
 }
+
+/*
+ * call-seq:
+ * archive.ctime -> Time
+ *
+ * call the File.ctime(path)
+ */
+
+
 VALUE Archive_ctime(VALUE self)
 {
 	return rb_funcall(rb_cFile,rb_intern("ctime"),1,Archive_path(self));
 }
+
+/*
+ * call-seq:
+ * archive.stat -> File::Stat
+ *
+ * call the File.stat(path)
+ */
+
 VALUE Archive_stat(VALUE self)
 {
 	return rb_funcall(rb_cFile,rb_intern("stat"),1,Archive_path(self));
 }
 
-VALUE Archive_inspect(VALUE self){
+/*
+ * call-seq:
+ * archive.inspect -> String
+ *
+ * returns readable string
+ */
+ 
+VALUE Archive_inspect(VALUE self)
+{
 		VALUE array[3];
 		array[0]=rb_str_new2("#<%s:%s>");
 		array[1]=rb_class_of(self);	
@@ -682,20 +945,24 @@ VALUE Archive_inspect(VALUE self){
 }
 
 extern "C" void Init_archive(void){
-	rb_require("tempfile");
+	//rb_require("tempfile");
 	rb_cArchive = rb_define_class("Archive",rb_cObject);
 	rb_define_alloc_func(rb_cArchive,Archive_alloc);
 	rb_define_method(rb_cArchive,"initialize",RUBY_METHOD_FUNC(Archive_initialize),1);
 	rb_define_private_method(rb_cArchive,"initialize_copy",RUBY_METHOD_FUNC(Archive_initialize_copy),1);
 	rb_define_method(rb_cArchive,"path",RUBY_METHOD_FUNC(Archive_path),0);
-	rb_define_method(rb_cArchive,"path=",RUBY_METHOD_FUNC(Archive_initialize),1);
+
 	rb_define_method(rb_cArchive,"each",RUBY_METHOD_FUNC(Archive_each),0);
+	rb_define_method(rb_cArchive,"[]",RUBY_METHOD_FUNC(Archive_get),1);
+
 	rb_define_method(rb_cArchive,"extract",RUBY_METHOD_FUNC(Archive_extract),-1);
 	rb_define_method(rb_cArchive,"extract_if",RUBY_METHOD_FUNC(Archive_extract_if),-1);
 	
 	rb_define_method(rb_cArchive,"delete",RUBY_METHOD_FUNC(Archive_delete),1);
 	rb_define_method(rb_cArchive,"delete_if",RUBY_METHOD_FUNC(Archive_delete_if),0);
-	rb_define_method(rb_cArchive,"move_to",RUBY_METHOD_FUNC(Archive_move_to),1);	
+	rb_define_method(rb_cArchive,"clear",RUBY_METHOD_FUNC(Archive_clear),0);
+	
+	//rb_define_method(rb_cArchive,"move_to",RUBY_METHOD_FUNC(Archive_move_to),1);
 
 	//rb_define_method(rb_cArchive,"clear",RUBY_METHOD_FUNC(Archive_clear),0);
 		
@@ -709,6 +976,7 @@ extern "C" void Init_archive(void){
 	rb_define_method(rb_cArchive,"format_name",RUBY_METHOD_FUNC(Archive_format_name),0);
 	rb_define_method(rb_cArchive,"compression_name",RUBY_METHOD_FUNC(Archive_compression_name),0);
 
+	rb_define_method(rb_cArchive,"unlink",RUBY_METHOD_FUNC(Archive_unlink),0);
 	rb_define_method(rb_cArchive,"exist?",RUBY_METHOD_FUNC(Archive_exist),0);
 	rb_define_method(rb_cArchive,"mtime",RUBY_METHOD_FUNC(Archive_mtime),0);
 	rb_define_method(rb_cArchive,"atime",RUBY_METHOD_FUNC(Archive_atime),0);
