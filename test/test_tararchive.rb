@@ -1,5 +1,27 @@
 #!/usr/bin/env ruby
 #Encoding: UTF-8
+=begin
+This file is part of libarchive-ruby. 
+
+libarchive-ruby is a Ruby binding for the C++ library libarchive. 
+
+Copyright © 2011 YOUR NAME
+
+libarchive-ruby is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+libarchive-ruby is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+=end
+
 gem "test-unit", ">= 2.1" #Ensure we use the gem
 require "test/unit"
 require_relative File.join("..","ext","archive")
