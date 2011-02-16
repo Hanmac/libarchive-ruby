@@ -58,10 +58,15 @@ Assuming, you have "myarchive.tar.bz2" in the current directory.
 	a = Archive.new("myarchive.tar.bz2")
 	puts "This archive contains:"
 	a.each{|entry| puts entry}
+	
 	#Archive includes the Enumerable module, making available all that 
 	#nice enumerating functionality: 
 	puts All entries in uppercase are:
 	puts a.map{|entry| entry.path.upcase}.join("\n")
+	
+	#Furthermore, you can even read from the files contained in the 
+	#archive without actually extracting it:
+	a.each{|entry, data| puts "Content of #{entry} is: #{data}"}
 
 === Extract an archive
 
@@ -97,6 +102,13 @@ current directory:
 
 Have a look at the documentation for the Archive and Archive::Entry classes 
 for more information. 
+
+== Contributors
+
+The following people have worked on libarchive-ruby beside 
+me: 
+
+* Quintus <sutniuq ÄT gmx DÖT net> contributed to the docs
 
 == License
 
