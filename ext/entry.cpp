@@ -1,9 +1,9 @@
 /****************************************************************************
 This file is part of libarchive-ruby. 
 
-libarchive-ruby is a Ruby binding for the C++ library libarchive. 
+libarchive-ruby is a Ruby binding for the C library libarchive. 
 
-Copyright (C) 2011 YOUR NAME
+Copyright (C) 2011 Hans Mackowiak
 
 libarchive-ruby is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -280,11 +280,7 @@ VALUE ArchiveEntry_set_symlink(VALUE self,VALUE val)
 	return val;
 }
 
-/*
- * call-seq:
- * entry.atime -> Time or nil
- *
- * returns access time
+/* :nodoc:
  */
 VALUE ArchiveEntry_atime(VALUE self)
 {
@@ -293,9 +289,7 @@ VALUE ArchiveEntry_atime(VALUE self)
 	else
 		return Qnil;
 }
-/*
- * Document-attr: name
- *
+/*:nodoc:
  * call-seq:
  * entry.ctime -> Time or nil
  *
@@ -308,7 +302,7 @@ VALUE ArchiveEntry_ctime(VALUE self)
 	else
 		return Qnil;
 }
-/*
+/*:nodoc:
  * call-seq:
  * entry.mtime -> Time or nil
  *
@@ -321,7 +315,7 @@ VALUE ArchiveEntry_mtime(VALUE self)
 	else
 		return Qnil;
 }
-/*
+/*:nodoc:
  * call-seq:
  * entry.birthtime -> Time or nil
  *
@@ -334,11 +328,7 @@ VALUE ArchiveEntry_birthtime(VALUE self)
 	else
 		return Qnil;
 }
-/*
- * call-seq:
- * entry.atime = Time or nil
- *
- * sets access time
+/* :nodoc:
  */
 VALUE ArchiveEntry_set_atime(VALUE self,VALUE value)
 {
@@ -348,7 +338,7 @@ VALUE ArchiveEntry_set_atime(VALUE self,VALUE value)
 		archive_entry_set_atime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
 	return value;
 }
-/*
+/*:nodoc:
  * call-seq:
  * entry.ctime = Time or nil
  *
@@ -362,7 +352,7 @@ VALUE ArchiveEntry_set_ctime(VALUE self,VALUE value)
 		archive_entry_set_ctime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
 	return value;
 }
-/*
+/*:nodoc:
  * call-seq:
  * entry.mtime = Time or nil
  *
@@ -376,7 +366,7 @@ VALUE ArchiveEntry_set_mtime(VALUE self,VALUE value)
 		archive_entry_set_mtime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
 	return value;
 }
-/*
+/*:nodoc:
  * call-seq:
  * entry.birthtime = Time or nil
  *
@@ -515,9 +505,29 @@ VALUE ArchiveEntry_initialize_copy(VALUE self,VALUE source)
 */
 
 
+/* Document-attr: atime
+ *
+ * Encapsulate the writing and reading of the configuration
+ * file. ...
+ */
+/* Document-attr: ctime
+ *
+ * Encapsulate the writing and reading of the configuration
+ * file. ...
+ */
+/* Document-attr: mtime
+ *
+ * Encapsulate the writing and reading of the configuration
+ * file. ...
+ */
+
 void Init_archive_entry(VALUE rb_cArchive){
 	#if(0)
 		rb_cArchive = rb_define_class("Archive",rb_cObject);
+		rb_define_attr(rb_cArchiveEntry,"atime",1,1);
+		rb_define_attr(rb_cArchiveEntry,"ctime",1,1);
+		rb_define_attr(rb_cArchiveEntry,"mtime",1,1);
+		rb_define_attr(rb_cArchiveEntry,"birthtime",1,1);
 	#endif
 	rb_cArchiveEntry = rb_define_class_under(rb_cArchive,"Entry",rb_cObject);
 	rb_define_alloc_func(rb_cArchiveEntry,ArchiveEntry_alloc);
@@ -543,12 +553,12 @@ void Init_archive_entry(VALUE rb_cArchive){
 	rb_define_method(rb_cArchiveEntry,"symlink=",RUBY_METHOD_FUNC(ArchiveEntry_set_symlink),1);
 	rb_define_method(rb_cArchiveEntry,"hardlink=",RUBY_METHOD_FUNC(ArchiveEntry_set_hardlink),1);
 
-	rb_define_method(rb_cArchiveEntry,"atime",RUBY_METHOD_FUNC(ArchiveEntry_atime),0);
+	rb_define_method(rb_cArchiveEntry,"atime",RUBY_METHOD_FUNC(ArchiveEntry_atime),0);//:nodoc:
 	rb_define_method(rb_cArchiveEntry,"ctime",RUBY_METHOD_FUNC(ArchiveEntry_ctime),0);
 	rb_define_method(rb_cArchiveEntry,"mtime",RUBY_METHOD_FUNC(ArchiveEntry_mtime),0);
 	rb_define_method(rb_cArchiveEntry,"birthtime",RUBY_METHOD_FUNC(ArchiveEntry_birthtime),0);
 
-	rb_define_method(rb_cArchiveEntry,"atime=",RUBY_METHOD_FUNC(ArchiveEntry_set_atime),1);
+	rb_define_method(rb_cArchiveEntry,"atime=",RUBY_METHOD_FUNC(ArchiveEntry_set_atime),1);//:nodoc:
 	rb_define_method(rb_cArchiveEntry,"ctime=",RUBY_METHOD_FUNC(ArchiveEntry_set_ctime),1);
 	rb_define_method(rb_cArchiveEntry,"mtime=",RUBY_METHOD_FUNC(ArchiveEntry_set_mtime),1);
 	rb_define_method(rb_cArchiveEntry,"birthtime=",RUBY_METHOD_FUNC(ArchiveEntry_set_birthtime),1);
@@ -575,4 +585,6 @@ void Init_archive_entry(VALUE rb_cArchive){
 		
 	//rb_define_method(rb_cArchiveEntry,"access_acl_count",RUBY_METHOD_FUNC(ArchiveEntry_access_acl_count),0);
 //*/
+
+
 }

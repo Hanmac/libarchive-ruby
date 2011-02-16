@@ -1,9 +1,9 @@
 /****************************************************************************
 This file is part of libarchive-ruby. 
 
-libarchive-ruby is a Ruby binding for the C++ library libarchive. 
+libarchive-ruby is a Ruby binding for the C library libarchive. 
 
-Copyright (C) 2011 YOUR NAME
+Copyright (C) 2011 Hans Mackowiak
 
 libarchive-ruby is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

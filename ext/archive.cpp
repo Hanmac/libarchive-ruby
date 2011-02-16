@@ -1,9 +1,9 @@
 /****************************************************************************
 This file is part of libarchive-ruby. 
 
-libarchive-ruby is a Ruby binding for the C++ library libarchive. 
+libarchive-ruby is a Ruby binding for the C library libarchive. 
 
-Copyright (C) 2011 YOUR NAME
+Copyright (C) 2011 Hans Mackowiak
 
 libarchive-ruby is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -58,6 +58,8 @@ VALUE Archive_initialize(VALUE self,VALUE path)
  * archive.path -> String
  *
  * returns path of Archive
+ * ===Return value
+ * returns path of the archive.
  */
 
 VALUE Archive_path(VALUE self)
@@ -67,10 +69,13 @@ VALUE Archive_path(VALUE self)
 
 /*
  * call-seq:
- * archive.each {|entry[,data] } -> Array
+ * archive.each {|entry[,data]| } -> Array
  * archive.each -> Enumerator
  *
- * returns path of Archive
+ * iterates Archive and returns Array of Archive::Entry
+ * ===Return value
+ * returns Array of Archive::Entry if block given
+ * returns Enumerator if no block given
  */
 
 VALUE Archive_each(VALUE self)
@@ -85,8 +90,17 @@ VALUE Archive_each(VALUE self)
 	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
 		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
 			VALUE temp = wrap(entry);
-			rb_yield(temp);
-			archive_read_data_skip(a); //TODO: method to read the data
+			if(rb_proc_arity(rb_block_proc())<2){
+				rb_yield(temp);
+				archive_read_data_skip(a);
+			}else{
+				char buff[8192];
+				std::string str;
+				size_t bytes_read;
+				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+					str.append(buff,bytes_read);
+				rb_yield_values(2,temp,rb_str_new2(str.c_str()));
+			}
 			rb_ary_push(result,temp);
 		}
 		archive_read_finish(a);
@@ -98,7 +112,11 @@ VALUE Archive_each(VALUE self)
  * call-seq:
  * archive[name] -> Archive::Entry or nil
  *
- * returns an archive entry or nil. name chould be String or Regex.
+ * returns an archive entry to the given name.
+ * ===Parameters
+ * [name] could be a String or a Regex.
+ * ===Return value
+ * returns Archive::Entry or nil
  */
 
 VALUE Archive_get(VALUE self,VALUE val)
@@ -119,8 +137,10 @@ VALUE Archive_get(VALUE self,VALUE val)
 			}else if(rb_obj_is_kind_of(val,rb_cRegexp)==Qtrue){
 				find = rb_reg_match(val,rb_str_new2(archive_entry_pathname(entry)))!=Qnil;
 			}
-			if(find)
+			if(find){
+				archive_read_finish(a);
 				return wrap(entry);
+			}
 		}
 		archive_read_finish(a);
 	}
@@ -128,28 +148,41 @@ VALUE Archive_get(VALUE self,VALUE val)
 }
 /*
  * call-seq:
- * archive.extract([name],[opt]) -> Array
- *
- * extract files
- * name could be an entry, a String and a Regex. 
- * opt is an option hash.
- *
- * :extract => flag, Integer combined of the Archive::Extract constants
+ * archive.extract([name,[io]],[opt]) -> Array
+ * 
+ * extract files to current directory
+ * ===Parameters
+ * [name] could be an entry, a String or an Regex. 
+ * [io] an instance of IO or something with a write method like StringIO
+ * [opt] is an option hash.
+ *  [:extract] > flag, Integer combined of the Archive::Extract constants
+ * ===Return value
+ * returns Array of Paths from the extracted entries
  */
 
 VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 {
-	VALUE result = rb_ary_new(),name,opts,temp;
+	char buff[8192];
+	size_t bytes_read;
+
+	VALUE result = rb_ary_new(),name,io,opts,temp;
 	struct archive *a = archive_read_new();
 	struct archive_entry *entry;
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);//add raw, this is not by all
-	int extract_opt = 0;
-	rb_scan_args(argc, argv, "02", &name,&opts);
+	int extract_opt = 0,fd=-1;
+	rb_scan_args(argc, argv, "03", &name,&io,&opts);
 	if(rb_obj_is_kind_of(name,rb_cHash)){
 		opts = name;name = Qnil;
 	}
+	if(rb_obj_is_kind_of(io,rb_cHash)){
+		opts = io;io = Qnil;
+	}
+	if(rb_obj_is_kind_of(io,rb_cIO))
+		fd = NUM2INT(rb_funcall(io,rb_intern("fileno"),0));
+	
+	
 	if(rb_obj_is_kind_of(opts,rb_cHash))
 		if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("extract")))))
 			extract_opt = NUM2INT(temp);
@@ -160,9 +193,21 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 				rb_ary_push(result,rb_str_new2(archive_entry_pathname(entry)));
 			}
 		}else{
-			//TODO: add extract_to_io 
 			if(rb_obj_is_kind_of(name,rb_cArchiveEntry)==Qtrue){
-				archive_read_extract(a,wrap<archive_entry*>(name),extract_opt);
+				if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
+					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+						if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
+							archive_read_data_into_fd(a,fd);
+					}
+				}else if(rb_respond_to(io,rb_intern("write"))){
+					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+						if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
+							while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+								rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
+							
+					}
+				}else
+					archive_read_extract(a,wrap<archive_entry*>(name),extract_opt);
 				rb_ary_push(result,rb_str_new2(archive_entry_pathname(wrap<archive_entry*>(name))));
 			}else if(rb_obj_is_kind_of(name,rb_cString)==Qtrue){
 				std::string str1(rb_string_value_cstr(&name)),str2(str1);
@@ -170,7 +215,13 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 				while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
 					const char *cstr = archive_entry_pathname(entry);
 					if(str1.compare(cstr)==0 || str2.compare(cstr)==0){
-						archive_read_extract(a,entry,extract_opt);
+						if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
+							archive_read_data_into_fd(a,fd);
+						}else if(rb_respond_to(io,rb_intern("write"))){
+							while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+									rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
+						}else
+							archive_read_extract(a,entry,extract_opt);
 						rb_ary_push(result,rb_str_new2(cstr));
 					}
 				}
@@ -178,7 +229,13 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 				while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
 					VALUE str = rb_str_new2(archive_entry_pathname(entry));
 					if(rb_reg_match(name,str)!=Qnil){
-						archive_read_extract(a,entry,extract_opt);
+						if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
+							archive_read_data_into_fd(a,fd);
+						}else if(rb_respond_to(io,rb_intern("write"))){
+							while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+									rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
+						}else
+							archive_read_extract(a,entry,extract_opt);
 						rb_ary_push(result,str);
 					}
 				}
@@ -195,10 +252,12 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
  * archive.extract_if([opt]) {|entry| }  -> Array
  * archive.extract_if([opt])  -> Enumerator
  *
- * extract files
- * opt is an option hash.
- *
- * :extract => flag, Integer combined of the Archive::Extract constants
+ * extract files to current directory
+ * ===Parameters
+ * [opt] is an option hash.
+ *   :extract => flag, Integer combined of the Archive::Extract constants
+ * ===Return value
+ * returns Array of Paths from the extracted entries, if no block given returns enumerator
  */
 
 VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
@@ -265,6 +324,8 @@ VALUE Archive_move_to(VALUE self,VALUE other)
  * archive.format -> Integer or nil
  *
  * returns the archive format as Integer.
+ * ===Return value
+ * Integer or nil
  */
 
 VALUE Archive_format(VALUE self)
@@ -288,6 +349,8 @@ VALUE Archive_format(VALUE self)
  * archive.compression -> Integer or nil
  *
  * returns the archive compression as Integer.
+ * ===Return value
+ * Integer or nil
  */
 
 VALUE Archive_compression(VALUE self)
@@ -311,6 +374,8 @@ VALUE Archive_compression(VALUE self)
  * archive.format_name -> String or nil
  *
  * returns the archive format as String.
+ * ===Return value
+ * String or nil
  */
  
 VALUE Archive_format_name(VALUE self)
@@ -334,6 +399,8 @@ VALUE Archive_format_name(VALUE self)
  * archive.compression_name -> String or nil
  *
  * returns the archive compression as String.
+ * ===Return value
+ * String or nil
  */
 
 VALUE Archive_compression_name(VALUE self)
@@ -356,7 +423,13 @@ VALUE Archive_compression_name(VALUE self)
  * call-seq:
  * archive.add(obj,pathname) -> self
  *
- * adds a file, possible parameter are string as path,IO and File object.
+ * adds a file to an archive.
+ * ===Parameters
+ * [obj] String,IO,File or an object with resond to "read"
+ * ===Return value
+ * self
+ * ===Raises
+ * raise error if the format has no write support 
  */
 
 VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
@@ -371,15 +444,20 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 	struct archive_entry *entry;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
-	int format= ARCHIVE_FORMAT_EMPTY,compression=ARCHIVE_COMPRESSION_NONE,fd,error;
+	int format= ARCHIVE_FORMAT_EMPTY,compression=ARCHIVE_COMPRESSION_NONE,fd=-1,error;
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	//autodetect format and compression
 	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
-		archive_read_next_header(a, &entry);
-		format = archive_format(a);
-		compression = archive_compression(a);
+		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
+			format = archive_format(a);
+			compression = archive_compression(a);
+			entries.push_back(archive_entry_clone(entry));
+			allbuff.push_back(std::string(""));
+			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+				allbuff.back().append(buff,bytes_read);
+		}
 		archive_read_finish(a);
 	}
 	if(rb_obj_is_kind_of(obj,rb_cString)){
@@ -395,6 +473,8 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
 		path = rb_string_value_cstr(&obj2);
 		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
+	}else if(rb_respond_to(obj,rb_intern("read"))){
+		//stringio has neigther path or fileno, so do nothing
 	}else
 		rb_raise(rb_eTypeError,"unsuported parameter!");
 
@@ -459,10 +539,17 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		if (path)
 			archive_entry_copy_sourcepath(entry, path);
 		archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
-		archive_read_disk_entry_from_file(c, entry, fd, NULL);
-		archive_write_header(b, entry);
-		while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
-			archive_write_data(b, buff, bytes_read);
+		if(fd < 0 and rb_respond_to(obj,rb_intern("read"))){
+			archive_write_header(b, entry);
+			VALUE result;
+			result = rb_funcall(obj,rb_intern("read"),0);
+			archive_write_data(b, rb_string_value_cstr(&result), RSTRING_LEN(result));
+		}else{
+			archive_read_disk_entry_from_file(c, entry, fd, NULL);
+			archive_write_header(b, entry);
+			while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
+				archive_write_data(b, buff, bytes_read);
+		}
 		archive_write_finish_entry(b);
 		archive_read_finish(c);
 		archive_write_finish(b);
@@ -477,7 +564,14 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
  * call-seq:
  * archive << obj -> self
  *
- * adds a file, possible parameter are string as path and File object.
+ * adds a file to an archive.
+ * ===Parameters
+ * [obj] String or File
+ * ===Return value
+ * self
+ * ===Raises
+ * raise TypeError if the parameter is neigther String or File.
+ * raise Error if the format has no write support 
  */
 VALUE Archive_add_shift(VALUE self,VALUE name)
 {
@@ -605,8 +699,14 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
  * call-seq:
  * archive.delete(name) -> Array
  *
- * extract files
- * name could be an entry, a String and a Regex.
+ * delete Files from archive.
+ * ===Parameters
+ * [name] a Archive::Entry a String or a Regex.
+ * ===Return value
+ * Array of paths of removes files
+ * ===Raises
+ * raise TypeError if the parameter is neigther String or File.
+ * raise Error if the format has no write support 
  */
 
 VALUE Archive_delete(VALUE self,VALUE val)
@@ -716,6 +816,12 @@ VALUE Archive_delete(VALUE self,VALUE val)
  * archive.delete_if -> Enumerator
  *
  * deletes entries from a archive if the block returns not false or nil
+ * ===Parameters
+ * [name] a Archive::Entry a String or a Regex.
+ * ===Return value
+ * self if block given, if not it returns Enumerator
+ * ===Raises
+ * raise Error if the format has no write support 
  */
 
 VALUE Archive_delete_if(VALUE self)
@@ -814,6 +920,10 @@ VALUE Archive_delete_if(VALUE self)
  * archive.clear -> self
  *
  * clear the archiv
+ * ===Return value
+ * returns self.
+ * ===Raises
+ * raise Error if the format has no write support 
  */
 
 VALUE Archive_clear(VALUE self)
@@ -876,7 +986,7 @@ VALUE Archive_clear(VALUE self)
 
 
 
-/*
+/*:nodoc:
  * call-seq:
  * archive.exist? -> true or false
  *
@@ -888,7 +998,7 @@ VALUE Archive_exist(VALUE self)
 	return rb_funcall(rb_cFile,rb_intern("exist?"),1,Archive_path(self));
 }
 
-/*
+/*:nodoc:
  * call-seq:
  * archive.unlink -> self
  *
@@ -901,7 +1011,7 @@ VALUE Archive_unlink(VALUE self)
 	return self;
 }
 
-/*
+/*:nodoc:
  * call-seq:
  * archive.mtime -> Time
  *
@@ -913,7 +1023,7 @@ VALUE Archive_mtime(VALUE self)
 	return rb_funcall(rb_cFile,rb_intern("mtime"),1,Archive_path(self));
 }
 
-/*
+/*:nodoc:
  * call-seq:
  * archive.atime -> Time
  *
@@ -925,7 +1035,7 @@ VALUE Archive_atime(VALUE self)
 	return rb_funcall(rb_cFile,rb_intern("atime"),1,Archive_path(self));
 }
 
-/*
+/*:nodoc:
  * call-seq:
  * archive.ctime -> Time
  *
@@ -938,7 +1048,7 @@ VALUE Archive_ctime(VALUE self)
 	return rb_funcall(rb_cFile,rb_intern("ctime"),1,Archive_path(self));
 }
 
-/*
+/*:nodoc:
  * call-seq:
  * archive.stat -> File::Stat
  *
@@ -955,6 +1065,8 @@ VALUE Archive_stat(VALUE self)
  * archive.inspect -> String
  *
  * returns readable string
+ * ===Return value
+ * String
  */
  
 VALUE Archive_inspect(VALUE self)
@@ -966,8 +1078,43 @@ VALUE Archive_inspect(VALUE self)
 		return rb_f_sprintf(3,array);
 }
 
+/*
+ * Document-class: Archive
+ *
+ * handels an archive
+*/ 
+/*
+ * Document-const: EXTRACT_TIME
+ *
+ * extract the atime and mtime
+*/
+/*
+ * Document-const: EXTRACT_PERM
+ *
+ * extract the permission
+*/
+/*
+ * Document-const: EXTRACT_OWNER
+ *
+ * extract the owner
+*/
+
+/*
+ * Document-const: EXTRACT_ACL
+ *
+ * extract the access control list
+*/
+/*
+ * Document-const: EXTRACT_FFLAGS
+ *
+ * extract the fflags
+*/
+/*
+ * Document-const: EXTRACT_XATTR
+ *
+ * extract the extended information
+*/
 extern "C" void Init_archive(void){
-	//rb_require("tempfile");
 	rb_cArchive = rb_define_class("Archive",rb_cObject);
 	rb_define_alloc_func(rb_cArchive,Archive_alloc);
 	rb_define_method(rb_cArchive,"initialize",RUBY_METHOD_FUNC(Archive_initialize),1);
@@ -986,7 +1133,7 @@ extern "C" void Init_archive(void){
 	
 	//rb_define_method(rb_cArchive,"move_to",RUBY_METHOD_FUNC(Archive_move_to),1);
 
-	//rb_define_method(rb_cArchive,"clear",RUBY_METHOD_FUNC(Archive_clear),0);
+
 		
 	rb_define_method(rb_cArchive,"add",RUBY_METHOD_FUNC(Archive_add),2);
 	rb_define_method(rb_cArchive,"<<",RUBY_METHOD_FUNC(Archive_add_shift),1);
@@ -1010,7 +1157,11 @@ extern "C" void Init_archive(void){
 	
 	Init_archive_entry(rb_cArchive);
 	
-	rb_const_set(rb_cArchive,rb_intern("EXTRACT_TIME"),INT2NUM(ARCHIVE_EXTRACT_TIME));
-	rb_const_set(rb_cArchive,rb_intern("EXTRACT_OWNER"),INT2NUM(ARCHIVE_EXTRACT_OWNER));
-	rb_const_set(rb_cArchive,rb_intern("EXTRACT_PERM"),INT2NUM(ARCHIVE_EXTRACT_PERM));
+	rb_define_const(rb_cArchive,"EXTRACT_TIME",INT2NUM(ARCHIVE_EXTRACT_TIME));
+	rb_define_const(rb_cArchive,"EXTRACT_OWNER",INT2NUM(ARCHIVE_EXTRACT_OWNER));
+	rb_define_const(rb_cArchive,"EXTRACT_PERM",INT2NUM(ARCHIVE_EXTRACT_PERM));
+	rb_define_const(rb_cArchive,"EXTRACT_NO_OVERWRITE",ARCHIVE_EXTRACT_NO_OVERWRITE));
+	rb_define_const(rb_cArchive,"EXTRACT_ACL",INT2NUM(ARCHIVE_EXTRACT_ACL));
+	rb_define_const(rb_cArchive,"EXTRACT_FFLAGS",INT2NUM(ARCHIVE_EXTRACT_FFLAGS));
+	rb_define_const(rb_cArchive,"EXTRACT_XATTR",INT2NUM(ARCHIVE_EXTRACT_XATTR));
 }
