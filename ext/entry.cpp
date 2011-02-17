@@ -579,12 +579,14 @@ void Init_archive_entry(VALUE rb_cArchive){
 	
 	rb_include_module(rb_cArchiveEntry,rb_mComparable);
 	rb_define_method(rb_cArchiveEntry,"<=>",RUBY_METHOD_FUNC(ArchiveEntry_compare),1);
+	
+	rb_define_alias(rb_cArchiveEntry,"to_s","path");
 /*	
 	//rb_define_method(rb_cArchiveEntry,"acl",RUBY_METHOD_FUNC(ArchiveEntry_acl),0);
 	//rb_define_method(rb_cArchiveEntry,"acl_add",RUBY_METHOD_FUNC(ArchiveEntry_acl_add),0);
 		
 	//rb_define_method(rb_cArchiveEntry,"access_acl_count",RUBY_METHOD_FUNC(ArchiveEntry_access_acl_count),0);
 //*/
-
+	
 
 }
