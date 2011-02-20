@@ -56,19 +56,25 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 {
 	VALUE path,r_format,r_compression;
 	rb_scan_args(argc, argv, "12", &path,&r_format,&r_compression);
-	path = rb_file_s_expand_path(1,&path);
-	_self->path = std::string(rb_string_value_cstr(&path));
-	
+	if(rb_obj_is_kind_of(path,rb_cIO)){
+		_self->fd = NUM2INT(rb_funcall(path,rb_intern("fileno"),0));
+		_self->type = archive_fd;
+		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
+	}else{
+		path = rb_file_s_expand_path(1,&path);
+		_self->path = std::string(rb_string_value_cstr(&path));
+		_self->type =archive_path;
+	}
 	
 	//to set the format the file must convert
 	if(!NIL_P(r_format)){
 	
 		char buff[8192];
-		std::string selfpath =_self->path;
+		//std::string selfpath =_self->path;
 		size_t bytes_read;
 		struct archive *a = archive_read_new(),*b=archive_write_new();
 		struct archive_entry *entry;
-		int format,compression,error;
+		int format,compression,error=0;
 		std::vector<struct archive_entry *> entries;
 		std::vector<std::string> allbuff;
 		if(rb_obj_is_kind_of(r_format,rb_cSymbol)!=Qtrue)
@@ -112,7 +118,18 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 		archive_read_support_format_all(a);
 		archive_read_support_format_raw(a);
 		//autodetect format and compression
-		if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+		
+		switch(_self->type){
+		case archive_path:
+			error = archive_read_open_filename(a,_self->path.c_str(),10240);
+			break;
+		case archive_fd:
+			error = archive_read_open_fd(a,_self->fd,10240);
+			break;
+		case archive_buffer: 
+			break;
+		}
+		if(error==ARCHIVE_OK){
 			while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 				if(format==archive_format(a) && compression==archive_compression(a)){
 					archive_read_finish(a);
@@ -131,9 +148,20 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 	
 		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
 			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
-		if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
+		
+		switch(_self->type){
+		case archive_path:
+			error = archive_write_open_filename(b,_self->path.c_str());
+			break;
+		case archive_fd:
+			error = archive_write_open_fd(b,_self->fd);
+			break;
+		case archive_buffer: 
+			break;
+		}		
+		if(error==ARCHIVE_OK){
 			//write old data back
-			for(int i=0; i<entries.size(); i++){
+			for(unsigned int i=0; i<entries.size(); i++){
 				archive_write_header(b,entries[i]);
 				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
 				archive_write_finish_entry(b);
@@ -155,7 +183,7 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 
 VALUE Archive_path(VALUE self)
 {
-	return rb_str_new2(_self->path.c_str());
+	return (_self->type == archive_path) ? rb_str_new2(_self->path.c_str()) : Qnil;
 }
 
 /*
@@ -178,7 +206,18 @@ VALUE Archive_each(VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
 			VALUE temp = wrap(entry);
 			if(rb_proc_arity(rb_block_proc())<2){
@@ -218,7 +257,18 @@ VALUE Archive_get(VALUE self,VALUE val)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
 			bool find = false;
 			if(rb_obj_is_kind_of(val,rb_cRegexp)==Qtrue){
@@ -265,7 +315,7 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);//add raw, this is not by all
-	int extract_opt = 0,fd=-1;
+	int extract_opt = 0,fd=-1,error=0;
 	rb_scan_args(argc, argv, "03", &name,&io,&opts);
 	if(rb_obj_is_kind_of(name,rb_cHash)){
 		opts = name;name = Qnil;
@@ -280,7 +330,19 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 	if(rb_obj_is_kind_of(opts,rb_cHash))
 		if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("extract")))))
 			extract_opt = NUM2INT(temp);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+			
+	
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		if(NIL_P(name)){
 			while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
 				archive_read_extract(a,entry,extract_opt);
@@ -368,13 +430,23 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	int extract_opt;
+	int extract_opt=0,error=0;
 	
 	rb_scan_args(argc, argv, "01", &opts);
 	if(rb_obj_is_kind_of(opts,rb_cHash))
 		if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("extract")))))
 			extract_opt = NUM2INT(temp);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
 			VALUE str = rb_str_new2(archive_entry_pathname(entry));
 			if(RTEST(rb_yield(wrap(entry)))){
@@ -385,37 +457,6 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 		archive_read_finish(a);
 	}
 	return result;
-}
-
-/*
- * 
- */
-
-VALUE Archive_move_to(VALUE self,VALUE other)
-{
-	//TODO: archiv to archiv does not work
-	VALUE result = rb_ary_new(),to_archive;
-	struct archive *a = archive_read_new();
-	struct archive *b = archive_write_new();
-	struct archive_entry *entry;
-	archive_read_support_compression_all(a);
-	archive_read_support_format_all(a);
-	archive_read_support_format_raw(a);
-	archive_write_set_format_zip(b);
-	archive_write_set_compression_none(b);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
-
-		if(archive_write_open_filename(b,wrap<rarchive*>(other)->path.c_str())==ARCHIVE_OK){
-			while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-				rb_warn("%s",archive_entry_pathname(entry));
-				archive_read_extract2(a,entry,b);
-				rb_ary_push(result,rb_str_new2(archive_entry_pathname(entry)));
-			}
-			
-			archive_write_finish(b);
-		}
-		archive_read_finish(a);
-	}
 }
 
 /*
@@ -435,7 +476,18 @@ VALUE Archive_format(VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		result = INT2NUM(archive_format(a));
 		archive_read_finish(a);
@@ -460,7 +512,18 @@ VALUE Archive_compression(VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		result = INT2NUM(archive_compression(a));
 		archive_read_finish(a);
@@ -485,7 +548,18 @@ VALUE Archive_format_name(VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		name = archive_format_name(a);
 		archive_read_finish(a);
@@ -510,7 +584,18 @@ VALUE Archive_compression_name(VALUE self)
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
-	if(archive_read_open_filename(a,_self->path.c_str(),10240)==ARCHIVE_OK){
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		name = archive_compression_name(a);
 		archive_read_finish(a);
@@ -533,9 +618,7 @@ VALUE Archive_compression_name(VALUE self)
  */
 
 VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
-{
-	
-	std::string selfpath =_self->path;
+{	
 	char buff[8192];
 	char *path = NULL;
 
@@ -544,20 +627,30 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 	struct archive_entry *entry;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
-	int format= ARCHIVE_FORMAT_EMPTY,compression=ARCHIVE_COMPRESSION_NONE,fd=-1,error;
+	int format= ARCHIVE_FORMAT_EMPTY,compression=ARCHIVE_COMPRESSION_NONE,fd=-1,error=0;
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	//autodetect format and compression
-	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
-			format = archive_format(a);
-			compression = archive_compression(a);
 			entries.push_back(archive_entry_clone(entry));
 			allbuff.push_back(std::string(""));
 			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
 				allbuff.back().append(buff,bytes_read);
 		}
+		format = archive_format(a);
+		compression = archive_compression(a);
 		archive_read_finish(a);
 	}
 	if(rb_obj_is_kind_of(obj,rb_cIO)){
@@ -579,20 +672,23 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 
 	//detect format and compression from filename
 	if(format == ARCHIVE_FORMAT_EMPTY){
-		if(selfpath.substr(selfpath.length()-7).compare(".tar.xz")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_XZ;
-		}else if(selfpath.substr(selfpath.length()-9).compare(".tar.lzma")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_LZMA;
-		}else if(selfpath.substr(selfpath.length()-7).compare(".tar.gz")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_GZIP;
-		}else if(selfpath.substr(selfpath.length()-8).compare(".tar.bz2")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_BZIP2;
-		}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
+		if(_self->type == archive_path){ 
+			std::string selfpath = _self->path;
+			if(selfpath.substr(selfpath.length()-7).compare(".tar.xz")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_XZ;
+			}else if(selfpath.substr(selfpath.length()-9).compare(".tar.lzma")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_LZMA;
+			}else if(selfpath.substr(selfpath.length()-7).compare(".tar.gz")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_GZIP;
+			}else if(selfpath.substr(selfpath.length()-8).compare(".tar.bz2")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_BZIP2;
+			}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+		}
 	}
 
 	if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
@@ -625,8 +721,18 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		break;	
 	}
 	
-	if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){	
-		for(int i=0; i<entries.size(); i++){
+	switch(_self->type){
+	case archive_path:
+		error = archive_write_open_filename(b,_self->path.c_str());
+		break;
+	case archive_fd:
+		error = archive_write_open_fd(b,_self->fd);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){	
+		for(unsigned int i=0; i<entries.size(); i++){
 			if(std::string(rb_string_value_cstr(&name)).compare(archive_entry_pathname(entries[i]))!=0){
 				archive_write_header(b,entries[i]);
 				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
@@ -674,7 +780,6 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 VALUE Archive_add_shift(VALUE self,VALUE name)
 {
 	VALUE pathname;
-	std::string selfpath =_self->path;
 	char buff[8192];
 	char *path;
 
@@ -684,20 +789,30 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,fd,error;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,fd,error=0;
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	//autodetect format and compression
-	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
-			format = archive_format(a);
-			compression = archive_compression(a);
 			entries.push_back(archive_entry_clone(entry));
 			allbuff.push_back(std::string(""));
 			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
 				allbuff.back().append(buff,bytes_read);
 		}
+		format = archive_format(a);
+		compression = archive_compression(a);
 		archive_read_finish(a);
 	}
 	if(rb_obj_is_kind_of(name,rb_cFile)){
@@ -716,20 +831,23 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 
 	//detect format and compression from filename
 	if(format == ARCHIVE_FORMAT_EMPTY){
-		if(selfpath.substr(selfpath.length()-7).compare(".tar.xz")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_XZ;
-		}else if(selfpath.substr(selfpath.length()-9).compare(".tar.lzma")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_LZMA;
-		}else if(selfpath.substr(selfpath.length()-7).compare(".tar.gz")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_GZIP;
-		}else if(selfpath.substr(selfpath.length()-8).compare(".tar.bz2")==0){
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-			compression=ARCHIVE_COMPRESSION_BZIP2;
-		}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
+		if(_self->type == archive_path){ 
+			std::string selfpath = _self->path;
+			if(selfpath.substr(selfpath.length()-7).compare(".tar.xz")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_XZ;
+			}else if(selfpath.substr(selfpath.length()-9).compare(".tar.lzma")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_LZMA;
+			}else if(selfpath.substr(selfpath.length()-7).compare(".tar.gz")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_GZIP;
+			}else if(selfpath.substr(selfpath.length()-8).compare(".tar.bz2")==0){
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+				compression=ARCHIVE_COMPRESSION_BZIP2;
+			}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
+				format=ARCHIVE_FORMAT_TAR_USTAR;
+		}
 	}
 	//format fix
 	if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
@@ -762,11 +880,20 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 		rb_raise(rb_eStandardError,"unsupported compresstype");
 		break;	
 	}
-	
 
-	if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_write_open_filename(b,_self->path.c_str());
+		break;
+	case archive_fd:
+		error = archive_write_open_fd(b,_self->fd);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		//write old data back
-		for(int i=0; i<entries.size(); i++){
+		for(unsigned int i=0; i<entries.size(); i++){
 			if(std::string(rb_string_value_cstr(&pathname)).compare(archive_entry_pathname(entries[i]))!=0){
 				archive_write_header(b,entries[i]);
 				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
@@ -808,11 +935,10 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 VALUE Archive_delete(VALUE self,VALUE val)
 {
 	char buff[8192];
-	std::string selfpath =_self->path;
 	size_t bytes_read;
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
 	
@@ -820,7 +946,17 @@ VALUE Archive_delete(VALUE self,VALUE val)
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	//autodetect format and compression
-	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			format = archive_format(a);
 			compression = archive_compression(a);
@@ -841,7 +977,7 @@ VALUE Archive_delete(VALUE self,VALUE val)
 				allbuff.push_back(std::string(""));
 				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
 					allbuff.back().append(buff,bytes_read);
-				}
+			}
 		}
 		archive_read_finish(a);
 	
@@ -876,10 +1012,19 @@ VALUE Archive_delete(VALUE self,VALUE val)
 			rb_raise(rb_eStandardError,"unsupported compresstype");
 			break;	
 		}
-	
-		if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
+		switch(_self->type){
+		case archive_path:
+			error = archive_write_open_filename(b,_self->path.c_str());
+			break;
+		case archive_fd:
+			error = archive_write_open_fd(b,_self->fd);
+			break;
+		case archive_buffer: 
+			break;
+		}
+		if(error==ARCHIVE_OK){
 			//write old data back
-			for(int i=0; i<entries.size(); i++){
+			for(unsigned int i=0; i<entries.size(); i++){
 				archive_write_header(b,entries[i]);
 				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
 				archive_write_finish_entry(b);
@@ -914,7 +1059,7 @@ VALUE Archive_delete_if(VALUE self)
 	size_t bytes_read;
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
 	
@@ -922,7 +1067,17 @@ VALUE Archive_delete_if(VALUE self)
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	//autodetect format and compression
-	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			format = archive_format(a);
 			compression = archive_compression(a);
@@ -931,7 +1086,7 @@ VALUE Archive_delete_if(VALUE self)
 				allbuff.push_back(std::string(""));
 				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
 					allbuff.back().append(buff,bytes_read);
-				}
+			}
 		}
 		archive_read_finish(a);
 		//format fix
@@ -964,9 +1119,19 @@ VALUE Archive_delete_if(VALUE self)
 			break;	
 		}
 	
-		if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK){
+		switch(_self->type){
+		case archive_path:
+			error = archive_write_open_filename(b,_self->path.c_str());
+			break;
+		case archive_fd:
+			error = archive_write_open_fd(b,_self->fd);
+			break;
+		case archive_buffer: 
+			break;
+		}
+		if(error==ARCHIVE_OK){
 			//write old data back
-			for(int i=0; i<entries.size(); i++){
+			for(unsigned int i=0; i<entries.size(); i++){
 				archive_write_header(b,entries[i]);
 				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
 				archive_write_finish_entry(b);
@@ -995,13 +1160,23 @@ VALUE Archive_clear(VALUE self)
 
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error;
+	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
 	
 	archive_read_support_compression_all(a);
 	archive_read_support_format_all(a);
 	archive_read_support_format_raw(a);
 	//autodetect format and compression
-	if(archive_read_open_filename(a,selfpath.c_str(),10240)==ARCHIVE_OK){
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	}
+	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		format = archive_format(a);
 		compression = archive_compression(a);
@@ -1038,7 +1213,17 @@ VALUE Archive_clear(VALUE self)
 			rb_raise(rb_eStandardError,"unsupported compresstype");
 			break;	
 		}
-		if(archive_write_open_filename(b,selfpath.c_str())==ARCHIVE_OK)
+		switch(_self->type){
+		case archive_path:
+			error = archive_write_open_filename(b,_self->path.c_str());
+			break;
+		case archive_fd:
+			error = archive_write_open_fd(b,_self->fd);
+			break;
+		case archive_buffer: 
+			break;
+		}
+		if(error==ARCHIVE_OK)
 			archive_write_finish(b);
 	}
 	
@@ -1140,9 +1325,21 @@ VALUE Archive_inspect(VALUE self)
 
 
 		VALUE array[3];
-		array[0]=rb_str_new2("#<%s:%s>");
-		array[1]=rb_class_of(self);	
-		array[2]=Archive_path(self);
+		switch(_self->type){
+		case archive_path:
+			array[0]=rb_str_new2("#<%s:%s>");
+			array[1]=rb_class_of(self);	
+			array[2]=Archive_path(self);
+			break;
+		case archive_fd:
+			array[0]=rb_str_new2("#<%s:%d>");
+			array[1]=rb_class_of(self);	
+			array[2]=INT2NUM(_self->fd);
+			break;
+		case archive_buffer: 
+			break;
+		}
+		
 		return rb_f_sprintf(3,array);
 }
 
