@@ -37,15 +37,17 @@ VALUE wrap(T arg){ return Qnil;};
 template <typename T>
 T wrap(const VALUE &arg){};
 
-enum archive_type {archive_path,archive_fd,archive_buffer};
+enum archive_type {archive_path,archive_fd,archive_buffer,archive_ruby};
 
 struct rarchive{
  //union drumrum?
 	std::string path;
-	
+	VALUE ruby;
 	std::string buffer;
 	int fd;
 	archive_type type;
+	int format;
+	int compression;
 };
 
 template <>

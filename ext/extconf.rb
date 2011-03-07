@@ -23,11 +23,11 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 
 require 'mkmf'
 
+dir_config("archive")
+pkg_config("libarchive")
+find_library("archive","main")
+find_header("archive.h")
 
-unless(pkg_config("libarchive"))
-	find_library("archive","main")
-	find_header("archive.h")
-end
 
 $CFLAGS += " -Wall"
 

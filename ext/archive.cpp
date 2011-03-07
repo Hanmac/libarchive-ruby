@@ -22,9 +22,16 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 
 #include "main.hpp"
 #include <vector>
+#include <exception>
+#include <stdexcept> 
 #define _self wrap<rarchive*>(self)
+#define RB_ENSURE(func1,obj1,func2,obj2)\
+ rb_ensure(RUBY_METHOD_FUNC(func1),(VALUE)obj1,RUBY_METHOD_FUNC(func2),(VALUE)obj2)
 
-VALUE rb_cArchive;
+//TODO: handle string IO as archive Archive.new(stringio)
+
+
+VALUE rb_cArchive,rb_eArchiveError,rb_eArchiveErrorFormat,rb_eArchiveErrorCompression;
 
 VALUE Archive_alloc(VALUE self)
 {
@@ -63,6 +70,40 @@ VALUE Archive_write_block_ensure(struct archive * data)
 	archive_write_finish(data);
 	return Qnil;
 }
+
+int rubymyopen(struct archive *a, void *client_data)
+{
+	rb_funcall((VALUE)client_data,rb_intern("rewind"),0);
+	return ARCHIVE_OK;
+}
+ssize_t
+rubymyread(struct archive *a, void *client_data, const void **buff)
+{
+	VALUE result =  rb_funcall((VALUE)client_data,rb_intern("read"),0);
+	if(result == Qnil){
+		*buff = NULL;
+		return 0;  	
+	}else{
+		if (RSTRING_LEN(result))
+			*buff = RSTRING_PTR(result);
+		else
+			*buff = NULL;
+		return RSTRING_LEN(result);
+	}
+}
+
+ssize_t rubymywrite(struct archive *a,void *client_data,const void *buffer, size_t length){
+	VALUE string = rb_str_new((char*)buffer,length);
+//	rb_funcall(string,rb_intern("rstrip!"),0);
+	return NUM2INT(rb_funcall((VALUE)client_data,rb_intern("write"),1,string));
+}
+
+int rubymyclose(struct archive *a, void *client_data)
+{
+	rb_funcall((VALUE)client_data,rb_intern("rewind"),0);
+	return ARCHIVE_OK;
+}
+
 /*
  * call-seq:
  * Archive.new(path,[format,[compression]]) -> archive
@@ -83,6 +124,10 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 	if(rb_obj_is_kind_of(path,rb_cIO)){
 		_self->fd = NUM2INT(rb_funcall(path,rb_intern("fileno"),0));
 		_self->type = archive_fd;
+		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
+	}else if(rb_respond_to(path,rb_intern("read"))){
+		_self->ruby = path;
+		_self->type = archive_ruby;
 		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
 	}else{
 		path = rb_file_s_expand_path(1,&path);
@@ -136,7 +181,7 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 			rb_raise(rb_eTypeError,"unsupported compression");
 		
 		if(error)
-			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+			rb_raise(rb_eArchiveError,"error (%d): %s ",archive_errno(b),archive_error_string(b));
 			
 		archive_read_support_compression_all(a);
 		archive_read_support_format_all(a);
@@ -152,7 +197,12 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 			break;
 		case archive_buffer: 
 			break;
+		case archive_ruby:
+			error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+			break;
 		}
+		_self->format = format;
+		_self->compression = compression;
 		if(error==ARCHIVE_OK){
 			while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 				if(format==archive_format(a) && compression==archive_compression(a)){
@@ -169,9 +219,9 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 		//format fix
 		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
 			format=ARCHIVE_FORMAT_TAR_USTAR;
-	
+		
 		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
 		
 		switch(_self->type){
 		case archive_path:
@@ -181,6 +231,9 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 			error = archive_write_open_fd(b,_self->fd);
 			break;
 		case archive_buffer: 
+			break;
+		case archive_ruby:
+			error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
 			break;
 		}		
 		if(error==ARCHIVE_OK){
@@ -216,15 +269,19 @@ VALUE Archive_each_block(struct archive *data)
 	struct archive_entry *entry;
 	while (archive_read_next_header(data, &entry) == ARCHIVE_OK) {
 		VALUE temp = wrap(entry);
-		if(rb_proc_arity(rb_block_proc())<2){
+		if(rb_proc_arity(rb_block_proc())==1){
 			rb_yield(temp);
 			archive_read_data_skip(data);
 		}else{
 			char buff[8192];
 			std::string str;
 			size_t bytes_read;
-			while ((bytes_read=archive_read_data(data,&buff,sizeof(buff)))>0)
-				str.append(buff,bytes_read);
+			try {
+				while ((bytes_read=archive_read_data(data,&buff,sizeof(buff)))>0)
+					str.append(buff,bytes_read);
+			}catch(...){
+				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(data),archive_error_string(data));
+			}
 			rb_yield_values(2,temp,rb_str_new2(str.c_str()));
 		}
 		rb_ary_push(result,temp);
@@ -261,10 +318,173 @@ VALUE Archive_each(VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK)
-		return rb_ensure(RUBY_METHOD_FUNC(Archive_each_block),(VALUE)a,RUBY_METHOD_FUNC(Archive_read_block_ensure),(VALUE)a);
+		return RB_ENSURE(Archive_each_block,a,Archive_read_block_ensure,a);
 	return Qnil;
+}
+
+
+VALUE Archive_each_entry_block(struct archive *data)
+{
+	VALUE result = rb_ary_new();
+	struct archive_entry *entry;
+	while (archive_read_next_header(data, &entry) == ARCHIVE_OK) {
+		VALUE temp = wrap(entry);
+		rb_yield(temp);
+		archive_read_data_skip(data);
+		rb_ary_push(result,temp);
+	}
+	return result;
+}
+
+/*
+ * call-seq:
+ * archive.each_entry {|entry| } -> Array
+ * archive.each_entry -> Enumerator
+ *
+ * Iterates through the archive and yields each entry as an Archive::Entry object.
+ * ===Return value
+ * If a block is given, returns an array of Archive::Entry objects, otherwise an enumerator. 
+ */
+
+VALUE Archive_each_entry(VALUE self)
+{
+	RETURN_ENUMERATOR(self,0,NULL);
+	struct archive *a = archive_read_new();
+
+	archive_read_support_compression_all(a);
+	archive_read_support_format_all(a);
+	archive_read_support_format_raw(a);
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
+	}
+	if(error==ARCHIVE_OK)
+		return RB_ENSURE(Archive_each_entry_block,a,Archive_read_block_ensure,a);
+	return Qnil;
+}
+
+
+VALUE Archive_each_data_block(struct archive *data)
+{
+	VALUE result = rb_ary_new();
+	struct archive_entry *entry;
+	while (archive_read_next_header(data, &entry) == ARCHIVE_OK) {
+		char buff[8192];
+		std::string str;
+		size_t bytes_read;
+		try{
+			while ((bytes_read=archive_read_data(data,&buff,sizeof(buff)))>0)
+				str.append(buff,bytes_read);
+		} catch (...){
+			rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(data),archive_error_string(data));
+		}
+		rb_yield(rb_str_new2(str.c_str()));
+		rb_ary_push(result,rb_str_new2(str.c_str()));
+	}
+	return result;
+}
+
+
+/*
+ * call-seq:
+ * archive.each_data {|data| } -> Array
+ * archive.each_data -> Enumerator
+ *
+ * Iterates through the archive and yields each data of an entry as a string object.
+ * ===Return value
+ * If a block is given, returns an array of String objects, otherwise an enumerator. 
+ */
+
+VALUE Archive_each_data(VALUE self)
+{
+	RETURN_ENUMERATOR(self,0,NULL);
+	struct archive *a = archive_read_new();
+
+	archive_read_support_compression_all(a);
+	archive_read_support_format_all(a);
+	archive_read_support_format_raw(a);
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
+	}
+	if(error==ARCHIVE_OK)
+		return RB_ENSURE(Archive_each_data_block,a,Archive_read_block_ensure,a);
+	return Qnil;
+}
+
+
+/*
+ * call-seq:
+ * archive.to_hash -> Hash
+ *
+ * Iterates through the archive and yields each data of an entry as a string object.
+ * ===Return value
+ * returns Hash of Archive::Entry => Sring
+ */
+
+VALUE Archive_to_hash(VALUE self)
+{
+	VALUE result = rb_hash_new();
+	struct archive *a = archive_read_new();
+	struct archive_entry *entry;
+	archive_read_support_compression_all(a);
+	archive_read_support_format_all(a);
+	archive_read_support_format_raw(a);
+	int error=0;
+	switch(_self->type){
+	case archive_path:
+		error = archive_read_open_filename(a,_self->path.c_str(),10240);
+		break;
+	case archive_fd:
+		error = archive_read_open_fd(a,_self->fd,10240);
+		break;
+	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
+	}
+	if(error==ARCHIVE_OK){
+		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+			char buff[8192];
+			std::string str;
+			size_t bytes_read;
+			try{
+				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+					str.append(buff,bytes_read);
+			} catch (...){
+				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
+			}
+			rb_hash_aset(result,wrap(entry),rb_str_new2(str.c_str()));
+		}
+		archive_read_finish(a);
+	}
+	return result;
 }
 
 VALUE Archive_map_block(struct write_obj * data){
@@ -333,6 +553,9 @@ VALUE Archive_map_self(VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
@@ -340,15 +563,19 @@ VALUE Archive_map_self(VALUE self)
 			compression = archive_compression(a);
 			entries.push_back(archive_entry_clone(entry));
 			allbuff.push_back(std::string(""));
-			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-				allbuff.back().append(buff,bytes_read);
+			try{
+				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+					allbuff.back().append(buff,bytes_read);
+			} catch (...){
+				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
+			}
 		}
 		archive_read_finish(a);
 		//format fix
 		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
 			format=ARCHIVE_FORMAT_TAR_USTAR;
 		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
 		switch(compression){
 		case ARCHIVE_COMPRESSION_NONE:
 			error = archive_write_set_compression_none(b);
@@ -368,9 +595,8 @@ VALUE Archive_map_self(VALUE self)
 		case ARCHIVE_COMPRESSION_XZ:
 			error = archive_write_set_compression_xz(b);
 			break;
-		case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
-		case ARCHIVE_COMPRESSION_RPM:
-			rb_raise(rb_eStandardError,"unsupported compresstype");
+		default:
+			rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
 			break;	
 		}
 	
@@ -383,13 +609,16 @@ VALUE Archive_map_self(VALUE self)
 			break;
 		case archive_buffer: 
 			break;
+		case archive_ruby:
+			error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
+			break;
 		}
 		if(error==ARCHIVE_OK){
 			write_obj obj;
 			obj.archive = b;
 			obj.entries = &entries;
 			obj.allbuff = &allbuff;
-			rb_ensure(RUBY_METHOD_FUNC(Archive_map_block),(VALUE)&obj,RUBY_METHOD_FUNC(Archive_write_block_ensure),(VALUE)b);
+			RB_ENSURE(Archive_map_block,&obj,Archive_write_block_ensure,b);
 		}	
 	}	
 	return self;
@@ -423,6 +652,9 @@ VALUE Archive_get(VALUE self,VALUE val)
 		error = archive_read_open_fd(a,_self->fd,10240);
 		break;
 	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
 		break;
 	}
 	if(error==ARCHIVE_OK){
@@ -498,63 +730,69 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
-		if(NIL_P(name)){
-			while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-				archive_read_extract(a,entry,extract_opt);
-				rb_ary_push(result,rb_str_new2(archive_entry_pathname(entry)));
-			}
-		}else{
-			if(rb_obj_is_kind_of(name,rb_cArchiveEntry)==Qtrue){
-				if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
-					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-						if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
-							archive_read_data_into_fd(a,fd);
-					}
-				}else if(rb_respond_to(io,rb_intern("write"))){
-					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-						if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
-							while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-								rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
-							
-					}
-				}else
-					archive_read_extract(a,wrap<archive_entry*>(name),extract_opt);
-				rb_ary_push(result,rb_str_new2(archive_entry_pathname(wrap<archive_entry*>(name))));
-			}else if(rb_obj_is_kind_of(name,rb_cRegexp)==Qtrue){
+		try{
+			if(NIL_P(name)){
 				while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-					VALUE str = rb_str_new2(archive_entry_pathname(entry));
-					if(rb_reg_match(name,str)!=Qnil){
-						if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
-							archive_read_data_into_fd(a,fd);
-						}else if(rb_respond_to(io,rb_intern("write"))){
-							while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-									rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
-						}else
-							archive_read_extract(a,entry,extract_opt);
-						rb_ary_push(result,str);
-					}
+					archive_read_extract(a,entry,extract_opt);
+					rb_ary_push(result,rb_str_new2(archive_entry_pathname(entry)));
 				}
 			}else{
-				name = rb_funcall(name,rb_intern("to_s"),0);
-				std::string str1(rb_string_value_cstr(&name)),str2(str1);
-				str2 += '/'; // dir ends of '/'
-				while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-					const char *cstr = archive_entry_pathname(entry);
-					if(str1.compare(cstr)==0 || str2.compare(cstr)==0){
-						if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
-							archive_read_data_into_fd(a,fd);
-						}else if(rb_respond_to(io,rb_intern("write"))){
-							while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+				if(rb_obj_is_kind_of(name,rb_cArchiveEntry)==Qtrue){
+					if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
+						while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+							if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
+								archive_read_data_into_fd(a,fd);
+						}
+					}else if(rb_respond_to(io,rb_intern("write"))){
+						while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+							if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
+								while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
 									rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
-						}else
-							archive_read_extract(a,entry,extract_opt);
-						rb_ary_push(result,rb_str_new2(cstr));
+							
+						}
+					}else
+						archive_read_extract(a,wrap<archive_entry*>(name),extract_opt);
+					rb_ary_push(result,rb_str_new2(archive_entry_pathname(wrap<archive_entry*>(name))));
+				}else if(rb_obj_is_kind_of(name,rb_cRegexp)==Qtrue){
+					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+						VALUE str = rb_str_new2(archive_entry_pathname(entry));
+						if(rb_reg_match(name,str)!=Qnil){
+							if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
+								archive_read_data_into_fd(a,fd);
+							}else if(rb_respond_to(io,rb_intern("write"))){
+								while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+										rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
+							}else
+								archive_read_extract(a,entry,extract_opt);
+							rb_ary_push(result,str);
+						}
+					}
+				}else{
+					name = rb_funcall(name,rb_intern("to_s"),0);
+					std::string str1(rb_string_value_cstr(&name)),str2(str1);
+					str2 += '/'; // dir ends of '/'
+					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+						const char *cstr = archive_entry_pathname(entry);
+						if(str1.compare(cstr)==0 || str2.compare(cstr)==0){
+							if(rb_obj_is_kind_of(io,rb_cIO)==Qtrue){
+								archive_read_data_into_fd(a,fd);
+							}else if(rb_respond_to(io,rb_intern("write"))){
+								while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+										rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
+							}else
+								archive_read_extract(a,entry,extract_opt);
+							rb_ary_push(result,rb_str_new2(cstr));
+						}
 					}
 				}
 			}
-			
+		}catch (...){
+			rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
 		}
 		archive_read_finish(a);
 	}
@@ -614,12 +852,15 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		extract_obj obj;
 		obj.archive = a;
 		obj.extract_opt = extract_opt;
-		return rb_ensure(RUBY_METHOD_FUNC(Archive_extract_if_block),(VALUE)&obj,RUBY_METHOD_FUNC(Archive_read_block_ensure),(VALUE)a);
+		return RB_ENSURE(Archive_extract_if_block,&obj,Archive_read_block_ensure,a);
 	}
 	return Qnil;
 }
@@ -650,6 +891,9 @@ VALUE Archive_format(VALUE self)
 		error = archive_read_open_fd(a,_self->fd,10240);
 		break;
 	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
 		break;
 	}
 	if(error==ARCHIVE_OK){
@@ -687,6 +931,9 @@ VALUE Archive_compression(VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
@@ -723,11 +970,15 @@ VALUE Archive_format_name(VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
-		archive_read_next_header(a, &entry);
-		name = archive_format_name(a);
-		archive_read_finish(a);
+		if(archive_read_next_header(a, &entry)==ARCHIVE_OK){
+			name = archive_format_name(a);
+			archive_read_finish(a);
+		}
 	}
 	return name ? rb_str_new2(name) : Qnil	;
 }
@@ -758,6 +1009,9 @@ VALUE Archive_compression_name(VALUE self)
 		error = archive_read_open_fd(a,_self->fd,10240);
 		break;
 	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
 		break;
 	}
 	if(error==ARCHIVE_OK){
@@ -806,13 +1060,20 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			entries.push_back(archive_entry_clone(entry));
 			allbuff.push_back(std::string(""));
-			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-				allbuff.back().append(buff,bytes_read);
+			try{
+				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+					allbuff.back().append(buff,bytes_read);
+			}catch(...){
+				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));	
+			}
 		}
 		format = archive_format(a);
 		compression = archive_compression(a);
@@ -860,7 +1121,7 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		format=ARCHIVE_FORMAT_TAR_USTAR;	
 	
 	if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-		rb_raise(rb_eStandardError,"error code: %d",error);
+		rb_raise(rb_eArchiveErrorFormat,"error:%d:%s",archive_errno(b),archive_error_string(b));
 	switch(compression){
 	case ARCHIVE_COMPRESSION_NONE:
 		error = archive_write_set_compression_none(b);
@@ -882,7 +1143,7 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		break;
 	case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
 	case ARCHIVE_COMPRESSION_RPM:
-		rb_raise(rb_eStandardError,"unsupported compresstype");
+		rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
 		break;	
 	}
 	
@@ -894,6 +1155,9 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		error = archive_write_open_fd(b,_self->fd);
 		break;
 	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
 		break;
 	}
 	if(error==ARCHIVE_OK){	
@@ -968,13 +1232,20 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			entries.push_back(archive_entry_clone(entry));
 			allbuff.push_back(std::string(""));
-			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-				allbuff.back().append(buff,bytes_read);
+			try{
+				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+					allbuff.back().append(buff,bytes_read);
+			}catch(...){
+				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));	
+			}
 		}
 		format = archive_format(a);
 		compression = archive_compression(a);
@@ -1012,6 +1283,10 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 				compression=ARCHIVE_COMPRESSION_BZIP2;
 			}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
 				format=ARCHIVE_FORMAT_TAR_USTAR;
+		}else
+		if(_self->format){
+			format = _self->format;
+			compression = _self->compression;
 		}
 	}
 	//format fix
@@ -1020,7 +1295,7 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 	
 	//TODO add archive-error
 	if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-		rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+		rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
 	switch(compression){
 	case ARCHIVE_COMPRESSION_NONE:
 		error = archive_write_set_compression_none(b);
@@ -1042,7 +1317,7 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 		break;
 	case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
 	case ARCHIVE_COMPRESSION_RPM:
-		rb_raise(rb_eStandardError,"unsupported compresstype");
+		rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
 		break;	
 	}
 
@@ -1054,6 +1329,9 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 		error = archive_write_open_fd(b,_self->fd);
 		break;
 	case archive_buffer: 
+		break;
+	case archive_ruby:
+		error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
 		break;
 	}
 	if(error==ARCHIVE_OK){
@@ -1120,6 +1398,9 @@ VALUE Archive_delete(VALUE self,VALUE val)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
@@ -1140,8 +1421,12 @@ VALUE Archive_delete(VALUE self,VALUE val)
 			if(!del){
 				entries.push_back(archive_entry_clone(entry));
 				allbuff.push_back(std::string(""));
-				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-					allbuff.back().append(buff,bytes_read);
+				try{
+					while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+						allbuff.back().append(buff,bytes_read);
+				}catch(...){
+					rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));	
+				}
 			}
 		}
 		archive_read_finish(a);
@@ -1152,7 +1437,7 @@ VALUE Archive_delete(VALUE self,VALUE val)
 	
 		//TODO add archive-error
 		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
 		switch(compression){
 		case ARCHIVE_COMPRESSION_NONE:
 			error = archive_write_set_compression_none(b);
@@ -1172,10 +1457,9 @@ VALUE Archive_delete(VALUE self,VALUE val)
 		case ARCHIVE_COMPRESSION_XZ:
 			error = archive_write_set_compression_xz(b);
 			break;
-		case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
-		case ARCHIVE_COMPRESSION_RPM:
-			rb_raise(rb_eStandardError,"unsupported compresstype");
-			break;	
+		default:
+			rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
+			break;
 		}
 		switch(_self->type){
 		case archive_path:
@@ -1185,6 +1469,9 @@ VALUE Archive_delete(VALUE self,VALUE val)
 			error = archive_write_open_fd(b,_self->fd);
 			break;
 		case archive_buffer: 
+			break;
+		case archive_ruby:
+			error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
 			break;
 		}
 		if(error==ARCHIVE_OK){
@@ -1253,6 +1540,9 @@ VALUE Archive_delete_if(VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
@@ -1260,15 +1550,19 @@ VALUE Archive_delete_if(VALUE self)
 			compression = archive_compression(a);
 			entries.push_back(archive_entry_clone(entry));
 			allbuff.push_back(std::string(""));
-			while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-				allbuff.back().append(buff,bytes_read);
+			try{
+				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+					allbuff.back().append(buff,bytes_read);
+			}catch(...){
+				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));	
+			}
 		}
 		archive_read_finish(a);
 		//format fix
 		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
 			format=ARCHIVE_FORMAT_TAR_USTAR;
 		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
 		switch(compression){
 		case ARCHIVE_COMPRESSION_NONE:
 			error = archive_write_set_compression_none(b);
@@ -1288,9 +1582,8 @@ VALUE Archive_delete_if(VALUE self)
 		case ARCHIVE_COMPRESSION_XZ:
 			error = archive_write_set_compression_xz(b);
 			break;
-		case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
-		case ARCHIVE_COMPRESSION_RPM:
-			rb_raise(rb_eStandardError,"unsupported compresstype");
+		default:
+			rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
 			break;	
 		}
 	
@@ -1303,13 +1596,16 @@ VALUE Archive_delete_if(VALUE self)
 			break;
 		case archive_buffer: 
 			break;
+		case archive_ruby:
+			error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
+			break;
 		}
 		if(error==ARCHIVE_OK){
 			write_obj obj;
 			obj.archive = b;
 			obj.entries = &entries;
 			obj.allbuff = &allbuff;
-			rb_ensure(RUBY_METHOD_FUNC(Archive_delete_if_block),(VALUE)&obj,RUBY_METHOD_FUNC(Archive_write_block_ensure),(VALUE)b);
+			RB_ENSURE(Archive_delete_if_block,&obj,Archive_write_block_ensure,b);
 		}	
 	}	
 	return self;
@@ -1348,6 +1644,9 @@ VALUE Archive_clear(VALUE self)
 		break;
 	case archive_buffer: 
 		break;
+	case archive_ruby:
+		error = archive_read_open(a, (void*)_self->ruby,rubymyopen,rubymyread,rubymyclose);
+		break;
 	}
 	if(error==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
@@ -1361,7 +1660,7 @@ VALUE Archive_clear(VALUE self)
 	
 		//TODO add archive-error
 		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eStandardError,"error (%d): %s ",error,archive_error_string(b));
+			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
 		switch(compression){
 		case ARCHIVE_COMPRESSION_NONE:
 			error = archive_write_set_compression_none(b);
@@ -1381,9 +1680,8 @@ VALUE Archive_clear(VALUE self)
 		case ARCHIVE_COMPRESSION_XZ:
 			error = archive_write_set_compression_xz(b);
 			break;
-		case ARCHIVE_COMPRESSION_UU: //uu and rpm has no write suport
-		case ARCHIVE_COMPRESSION_RPM:
-			rb_raise(rb_eStandardError,"unsupported compresstype");
+		default:
+			rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
 			break;	
 		}
 		switch(_self->type){
@@ -1394,6 +1692,9 @@ VALUE Archive_clear(VALUE self)
 			error = archive_write_open_fd(b,_self->fd);
 			break;
 		case archive_buffer: 
+			break;
+		case archive_ruby:
+			error = archive_write_open(b,(void*)_self->ruby,rubymyopen,rubymywrite,rubymyclose);
 			break;
 		}
 		if(error==ARCHIVE_OK)
@@ -1511,6 +1812,11 @@ VALUE Archive_inspect(VALUE self)
 			break;
 		case archive_buffer: 
 			break;
+		case archive_ruby:
+			array[0]=rb_str_new2("#<%s:%s>");
+			array[1]=rb_class_of(self);	
+			array[2]=_self->ruby;
+			break;
 		}
 		
 		return rb_f_sprintf(3,array);
@@ -1565,10 +1871,14 @@ extern "C" void Init_archive(void){
 	rb_define_method(rb_cArchive,"path",RUBY_METHOD_FUNC(Archive_path),0);
 
 	rb_define_method(rb_cArchive,"each",RUBY_METHOD_FUNC(Archive_each),0);
+	rb_define_method(rb_cArchive,"each_entry",RUBY_METHOD_FUNC(Archive_each_entry),0);
+	rb_define_method(rb_cArchive,"each_data",RUBY_METHOD_FUNC(Archive_each_data),0);
 	rb_define_method(rb_cArchive,"map!",RUBY_METHOD_FUNC(Archive_map_self),0);
 	rb_define_alias(rb_cArchive,"collect!","map!");
 	rb_define_method(rb_cArchive,"[]",RUBY_METHOD_FUNC(Archive_get),1);
-
+	
+	rb_define_method(rb_cArchive,"to_hash",RUBY_METHOD_FUNC(Archive_to_hash),0);
+	
 	rb_define_method(rb_cArchive,"extract",RUBY_METHOD_FUNC(Archive_extract),-1);
 	rb_define_method(rb_cArchive,"extract_if",RUBY_METHOD_FUNC(Archive_extract_if),-1);
 	
@@ -1609,4 +1919,8 @@ extern "C" void Init_archive(void){
 	rb_define_const(rb_cArchive,"EXTRACT_ACL",INT2NUM(ARCHIVE_EXTRACT_ACL));
 	rb_define_const(rb_cArchive,"EXTRACT_FFLAGS",INT2NUM(ARCHIVE_EXTRACT_FFLAGS));
 	rb_define_const(rb_cArchive,"EXTRACT_XATTR",INT2NUM(ARCHIVE_EXTRACT_XATTR));
+	
+	rb_eArchiveError = rb_define_class_under(rb_cArchive,"Error",rb_eStandardError);
+	rb_eArchiveErrorFormat = rb_define_class_under(rb_eArchiveError,"Format",rb_eArchiveError);
+	rb_eArchiveErrorCompression = rb_define_class_under(rb_eArchiveError,"Compression",rb_eArchiveError);
 }
