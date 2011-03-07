@@ -105,17 +105,33 @@ int rubymyclose(struct archive *a, void *client_data)
 }
 
 /*
- * call-seq:
- * Archive.new(path,[format,[compression]]) -> archive
- *
- * Makes a new Archive object. if format is given, a new archive is created or an existing archive will be converted into the given format 
+ *call-seq:
+ *   new( path [, format [, compression ] ] ) → an_archive
+ * 
+ * Makes a new Archive object. If format is given, a new archive is created or 
+ * an existing archive will be converted into the given format. 
  * ===Parameters
- * [path] The path to the archive. May or may not exist. 
- * [format] optional symbol of the format of an archive
- * [compression] optional symbol of the compression
+ * [path]   The path to the archive. May or may not exist. 
+ * [format] The archive's format as a symbol. If you ommit this, the format will 
+ *          be guessed from the file extension. Possible formats are: 
+ *          * :ar
+ *          * :tar
+ *          * :xar
+ *          * :zip
+ * [compression] Symbol inidicating the compression you want to use. If 
+ *               ommited, it will be guessed from the file extension. 
+ *               Possible formats are: 
+ *               * :bzip2
+ *               * :compress
+ *               * :gzip
+ *               * :lzma
+ *               * :xz
  * ===Raises
- * raise error if the wrong format of wrong compression is given.
- */
+ * [FormatError]      Unknown archive format or writing not supported. 
+ * [CompressionError] Unknown compression format. 
+ * ===Examples
+ * See the README for some examples. 
+*/
  
 VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 {
@@ -251,12 +267,14 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 
 /*
  * call-seq:
- * archive.path -> String
- *
- * returns path of Archive
+ *   path() → a_string
+ * 
+ * Returns the path (filename) of the archive. 
  * ===Return value
  * Returns path of the archive. May or may not exist. 
- */
+ * ===Example
+ *  a.path #=> /home/freak/myarchive.tar.gz
+*/
 
 VALUE Archive_path(VALUE self)
 {
@@ -291,14 +309,22 @@ VALUE Archive_each_block(struct archive *data)
 
 /*
  * call-seq:
- * archive.each {|entry[,data]| } -> Array
- * archive.each -> Enumerator
- *
+ *   each(){|entry [, data]| ... } → an_array
+ *   each()                        → an_enumerator
+ * 
  * Iterates through the archive and yields each entry as an Archive::Entry object. The second parameter 
  * contains the data of that entry, so you don't have to extract it only to read what's in it. 
  * ===Return value
  * If a block is given, returns an array of Archive::Entry objects, otherwise an enumerator. 
- */
+ * ===Example
+ *   a.each{|entry| p entry.path}
+ *   a.each{|entry, data| puts "'#{entry.path}' contains '#{data}'"}
+ * Output: 
+ *   "file1.txt"
+ *   "file2.txt"
+ *   'file1.txt' contains 'I am file1!'
+ *   'file2.txt' contains 'I am file2!'
+*/
 
 VALUE Archive_each(VALUE self)
 {
@@ -343,13 +369,19 @@ VALUE Archive_each_entry_block(struct archive *data)
 
 /*
  * call-seq:
- * archive.each_entry {|entry| } -> Array
- * archive.each_entry -> Enumerator
- *
- * Iterates through the archive and yields each entry as an Archive::Entry object.
+ *   each_entry() {|entry| ... } → an_array
+ *   each_entry()                → an_enumerator
+ * 
+ * Iterates through the archive and yields each entry as an Archive::Entry object. 
+ * This is the same as #each, but doesn't allow for the second block parameter. 
  * ===Return value
  * If a block is given, returns an array of Archive::Entry objects, otherwise an enumerator. 
- */
+ * ===Example
+ *   a.each_entry{|entry| p entry.path}
+ * Output:
+ *   "file1.txt"
+ *   "file2.txt"
+*/
 
 VALUE Archive_each_entry(VALUE self)
 {
@@ -402,13 +434,19 @@ VALUE Archive_each_data_block(struct archive *data)
 
 /*
  * call-seq:
- * archive.each_data {|data| } -> Array
- * archive.each_data -> Enumerator
- *
- * Iterates through the archive and yields each data of an entry as a string object.
+ *   each_data() {|data| }    → an_array
+ *   each_data()              → an_enumerator
+ * 
+ * Iterates through the archive and yields each entry's data as a string. 
+ * This is the same as #each, but doesn't allow for the first block parameter. 
  * ===Return value
  * If a block is given, returns an array of String objects, otherwise an enumerator. 
- */
+ * ===Example
+ *   a.each{|data| puts "This is: '#{data}'"}
+ * Output: 
+ *   This is: 'I am file1!'
+ *   This is: 'I am file2!'
+*/
 
 VALUE Archive_each_data(VALUE self)
 {
@@ -440,12 +478,12 @@ VALUE Archive_each_data(VALUE self)
 
 /*
  * call-seq:
- * archive.to_hash -> Hash
- *
+ *   archive.to_hash → Hash
+ * 
  * Iterates through the archive and yields each data of an entry as a string object.
  * ===Return value
  * returns Hash of Archive::Entry => Sring
- */
+*/
 
 VALUE Archive_to_hash(VALUE self)
 {
@@ -521,13 +559,27 @@ VALUE Archive_map_block(struct write_obj * data){
 
 /*
  * call-seq:
- * archive.map! {|entry[,data]| } -> Array
- * archive.map! -> Enumerator
- *
- * Changes the data of an archive.
+ *   map!() {| entry [,data] | ... } → Array
+ *   archive.map!()                  → Enumerator
+ * 
+ * Iterates through the archive and changes it's data "on the fly", i.e. 
+ * the value your block returns for each iteration is put for the data 
+ * in the yielded entry. Your block is expected to return a 2-element 
+ * array of form
+ * [archive_entry, "data"]
+ * where +archive_enty+ is the +entry+ yielded to the block (which you 
+ * may modify via the Archive::Entry methods) and <tt>"data"</tt> is a 
+ * string containing the data you want to set for this entry. 
+ * 
+ * The block parameters are the same as for #each. 
  * ===Return value
- * the archive itself.
- */
+ * The archive itself.
+ * ===Example
+ *   #Double the contents in each file of the archive
+ *   a.map!{|entry, data| [entry, data * 2]}
+ *   #Clear all files in the archive
+ *   a.map!{|entry| [entry, ""]}
+*/
 VALUE Archive_map_self(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
@@ -626,15 +678,20 @@ VALUE Archive_map_self(VALUE self)
 
 /*
  * call-seq:
- * archive[name] -> Archive::Entry or nil
- *
+ *   [](name) → Archive::Entry or nil
+ * 
  * Returns an archive entry for the given name.
  * ===Parameters
  * [name] could be a String or a Regex.
  * ===Return value
  * If a matching entry is found, it's returned as an Archive::Entry object. If not, 
  * nil is returned. 
- */
+ * ===Example
+ *   #Assuming your archive contains file.txt and ruby.txt
+ *   
+ *   a["file.txt"] #=> Archive::Entry
+ *   a[/txt/] #=> Archive::Entry
+*/
 
 VALUE Archive_get(VALUE self,VALUE val)
 {
@@ -680,18 +737,36 @@ VALUE Archive_get(VALUE self,VALUE val)
 }
 /*
  * call-seq:
- * archive.extract( [name [, io [ ,opt ] ] ] ) -> Array
+ *   extract( [name = nil [, io [ ,opt ] ] ] ) → an_array
  * 
  * Extract files to current directory. 
  * ===Parameters
- * [name]     could be an Archive::Entry, a String or an Regex. 
- * [io]       an instance of IO or something with a write method like StringIO
- * [opt]      is an option hash.
+ * [name]     (nil) could be an Archive::Entry, a String or an Regex. If given, 
+ *            only this entry is extracted. Otherwise extracts the whole 
+ *            archive. 
+ * [io]       an instance of IO or something with a +write+ method like 
+ *            StringIO. If given, the entry specified via +name+ will be 
+ *            extracted into +io+ instead of a file. 
+ * [opt]      is an option hash. See below for possible options. 
  * ===Parameters for the option hash
- * [:extract] flag, Integer combined of the Archive::Extract_* constants
+ * [:extract] flag, Integer combined of the Archive::Extract_* constants. 
+ *            This tells libarchive-ruby to only extract the file attributes 
+ *            you specify here. Exceptions is Archive::EXTRACT_NO_OVERWRITE 
+ *            which prevents this method from overwrtiting existing files. 
  * ===Return value
- * The paths of the extracted entries. 
- */
+ * The paths of the extracted entries as an array. 
+ * ===Example
+ *   #Simply extract everything into the current directory. 
+ *   a.extract
+ *   #Extract only file1.txt
+ *   a.extract("file1.txt")
+ *   #Same as above, but extract it to a StringIO
+ *   s = StringIO.new
+ *   a.extract("file1.txt", s)
+ *   #Same as the first example, but only extract information about the 
+ *   #modification time. 
+ *   a.extract(nil, nil, extract: Archive::EXTRACT_TIME)
+*/
 
 VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 {
@@ -814,20 +889,20 @@ VALUE Archive_extract_if_block(struct extract_obj * data)
 }
 /*
  * call-seq:
- * archive.extract_if([opt]) {|entry| }  -> Array
- * archive.extract_if([opt])  -> Enumerator
- *
+ *   extract_if( [ opt ] ) {|entry| } → an_array
+ *   extract_if( [ opt ] )            → an_enumerator
+ * 
  * Yields each entry in the archive to the block and extracts only those 
  * entries (to the current directory) for which the block evaluates to a 
  * truth value. 
  * ===Parameters
- * [opt] is an option hash.
+ * [opt] is the same option hash that you can pass to #extract. 
  * ====Parameters for the option hash
- * [:extract] flag, Integer combined of the Archive::Extract_* constants
+ * See the #extract method for explanation. 
  * ===Return value
  * The paths of all extracted entries if a block was given, an Enumerator 
  * otherwise. 
- */
+*/
 
 VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 {
@@ -867,12 +942,13 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 
 /*
  * call-seq:
- * archive.format -> Integer or nil
- *
- * returns the archive format as Integer.
+ *   format() → an_integer or nil
+ * 
+ * Returns the archive format as an integer. You should use #format_name 
+ * instead. 
  * ===Return value
- * Integer or nil
- */
+ * An integer or nil if the format wasn't detectable. 
+*/
 
 VALUE Archive_format(VALUE self)
 {
@@ -906,12 +982,14 @@ VALUE Archive_format(VALUE self)
 
 /*
  * call-seq:
- * archive.compression -> Integer or nil
- *
- * returns the archive compression as Integer.
+ *   compression() → an_integer or nil
+ * 
+ * Returns the archive compression as an integer. You should use 
+ * #compression_name instead. 
  * ===Return value
- * Integer or nil
- */
+ * An integer or nil if the compression wasn't detectable. 0 means 
+ * no compression. 
+*/
 
 VALUE Archive_compression(VALUE self)
 {
@@ -945,12 +1023,14 @@ VALUE Archive_compression(VALUE self)
 
 /*
  * call-seq:
- * archive.format_name -> String or nil
- *
- * Returns the archive's format as String.
+ *   format_name() → a_string or nil
+ * 
+ * Returns the archive format's name as a string.
  * ===Return value
- * String or nil
- */
+ * A string or nil if the format wasn't detectable. 
+ * ===Example
+ *   a.format_name #=> "GNU tar format"
+*/
  
 VALUE Archive_format_name(VALUE self)
 {
@@ -985,12 +1065,17 @@ VALUE Archive_format_name(VALUE self)
 
 /*
  * call-seq:
- * archive.compression_name -> String or nil
- *
- * returns the archive's compression's name as String.
+ *   compression_name() → a_string or nil
+ * 
+ * Returns the archive compression's name as a string.
  * ===Return value
- * String or nil
- */
+ * A string or nil if the compression format wasn't detectable. If there 
+ * is no compression, <tt>"none"</tt> is returned. 
+ * ===Example
+ *   a.compression_name #=> "gzip"
+ *   
+ *   a.compression_name #=> "none"
+*/
 
 VALUE Archive_compression_name(VALUE self)
 {
@@ -1024,8 +1109,8 @@ VALUE Archive_compression_name(VALUE self)
 
 /*
  * call-seq:
- * archive.add(obj, path) -> self
- *
+ *   add( obj , path ) → self
+ * 
  * Adds a file to an archive.
  * ===Parameters
  * [obj]  String, IO, File or an object which responds to +read+. 
@@ -1033,8 +1118,8 @@ VALUE Archive_compression_name(VALUE self)
  * ===Return value
  * self
  * ===Raises
- * raise error if the format has no write support 
- */
+ * [FormatError] Raised if the archive format is not supported for writing. 
+*/
 
 VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 {	
@@ -1196,16 +1281,17 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 
 /*
  * call-seq:
- * archive << obj -> self
- *
- * Adds a file to an archive.
+ *   << obj → self
+ * 
+ * Adds a file to an archive. Basicly the same as #add, but you can't 
+ * set the path inside the archive. 
  * ===Parameters
  * [obj] String or File
  * ===Return value
  * self
  * ===Raises
- * raise Error if the format has no write support 
- */
+ * [FormatError] The archive format is not supported for writing. 
+*/
 VALUE Archive_add_shift(VALUE self,VALUE name)
 {
 	VALUE pathname;
@@ -1363,9 +1449,9 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 
 /*
  * call-seq:
- * archive.delete(name) -> Array
- *
- * Delete files from archive.
+ *   delete( name ) → an_array
+ * 
+ * Delete files from an archive.
  * ===Parameters
  * [name] An Archive::Entry, a String or a Regex.
  * ===Return value
@@ -1373,7 +1459,7 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
  * ===Raises
  * raise TypeError if the parameter is neigther String or File.
  * raise Error if the format has no write support 
- */
+*/
 
 VALUE Archive_delete(VALUE self,VALUE val)
 {
@@ -1502,9 +1588,9 @@ VALUE Archive_delete_if_block(struct write_obj * data)
 
 /*
  * call-seq:
- * archive.delete_if {|entry| } -> self
- * archive.delete_if -> Enumerator
- *
+ *   archive.delete_if {|entry| } -> self
+ *   archive.delete_if -> Enumerator
+ * 
  * Yields each entry in the archive to the block and deletes those for which 
  * the block evaluates to a truth value. 
  * ===Parameters
@@ -1513,7 +1599,7 @@ VALUE Archive_delete_if_block(struct write_obj * data)
  * If a block was given, returns self, otherwise an Enumerator. 
  * ===Raises
  * raise Error if the format has no write support 
- */
+*/
 
 VALUE Archive_delete_if(VALUE self)
 {
@@ -1613,14 +1699,14 @@ VALUE Archive_delete_if(VALUE self)
 
 /*
  * call-seq:
- * archive.clear -> self
- *
+ *   archive.clear -> self
+ * 
  * Deletes all files from an archive. 
  * ===Return value
  * returns self.
  * ===Raises
  * raise Error if the format has no write support 
- */
+*/
 
 VALUE Archive_clear(VALUE self)
 {
@@ -1709,14 +1795,14 @@ VALUE Archive_clear(VALUE self)
 
 /*:nodoc:
  * call-seq:
- * archive.exist? -> true or false
- *
+ *   archive.exist? -> true or false
+ * 
  * Same as 
  *  File.exist?(archive.path)
  * . Checks wheather or not the archive file is existant. 
- *===Return value
+ * ===Return value
  * True or false. 
- */
+*/
 
 VALUE Archive_exist(VALUE self)
 {
@@ -1726,9 +1812,9 @@ VALUE Archive_exist(VALUE self)
 /*:nodoc:
  * call-seq:
  * archive.unlink -> self
- *
+ * 
  * call the File.unlink(path)
- */
+*/
 
 VALUE Archive_unlink(VALUE self)
 {
@@ -1739,9 +1825,9 @@ VALUE Archive_unlink(VALUE self)
 /*:nodoc:
  * call-seq:
  * archive.mtime -> Time
- *
+ * 
  * call the File.mtime(path)
- */
+*/
 
 VALUE Archive_mtime(VALUE self)
 {
@@ -1751,9 +1837,9 @@ VALUE Archive_mtime(VALUE self)
 /*:nodoc:
  * call-seq:
  * archive.atime -> Time
- *
+ * 
  * call the File.atime(path)
- */
+*/
 
 VALUE Archive_atime(VALUE self)
 {
@@ -1763,9 +1849,9 @@ VALUE Archive_atime(VALUE self)
 /*:nodoc:
  * call-seq:
  * archive.ctime -> Time
- *
+ * 
  * call the File.ctime(path)
- */
+*/
 
 
 VALUE Archive_ctime(VALUE self)
@@ -1776,9 +1862,9 @@ VALUE Archive_ctime(VALUE self)
 /*:nodoc:
  * call-seq:
  * archive.stat -> File::Stat
- *
+ * 
  * call the File.stat(path)
- */
+*/
 
 VALUE Archive_stat(VALUE self)
 {
@@ -1787,12 +1873,12 @@ VALUE Archive_stat(VALUE self)
 
 /*
  * call-seq:
- * archive.inspect -> String
- *
+ *   archive.inspect -> String
+ * 
  * Human-readable description. 
  * ===Return value
  * String
- */
+*/
  
 VALUE Archive_inspect(VALUE self)
 {
@@ -1823,8 +1909,24 @@ VALUE Archive_inspect(VALUE self)
 }
 
 /*
+ * Document-class: Archive::Error
+ * This is the superclass of all errors specific to this library. 
+*/
+
+/*
+ * Document-class: Archive::Error::Compression
+ * This exception is thrown if you try to use an unknown compression format. 
+*/
+
+/*
+ * Document-class: Archive::Error::Format
+ * This exception is thrown if you try to use an unknown archive format or libarchive doesn't 
+ * have write support for the format you wanted to write. 
+*/
+
+/*
  * Document-class: Archive
- *
+ * 
  * This class represents an archive file. The file may or may not exist, 
  * depending on wheather you want to create a new archive or read from 
  * an existing one. When instanciating this class, libarchive-ruby will 
@@ -1834,33 +1936,33 @@ VALUE Archive_inspect(VALUE self)
 */ 
 /*
  * Document-const: EXTRACT_TIME
- *
+ * 
  * extract the atime and mtime
 */
 /*
  * Document-const: EXTRACT_PERM
- *
+ * 
  * extract the permission
 */
 /*
  * Document-const: EXTRACT_OWNER
- *
+ * 
  * extract the owner
 */
 
 /*
  * Document-const: EXTRACT_ACL
- *
+ * 
  * extract the access control list
 */
 /*
  * Document-const: EXTRACT_FFLAGS
- *
+ * 
  * extract the fflags
 */
 /*
  * Document-const: EXTRACT_XATTR
- *
+ * 
  * extract the extended information
 */
 extern "C" void Init_archive(void){
