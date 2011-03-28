@@ -58,6 +58,14 @@ struct write_obj {
 	std::vector<std::string> *allbuff;
 };
 
+struct add_obj {
+	struct archive* archive;
+	struct archive* file;
+	struct archive_entry* entry;
+	int fd;
+	VALUE obj;
+};
+
 
 VALUE Archive_read_block_ensure(struct archive * data)
 {
@@ -124,6 +132,9 @@ void Archive_format_from_path(VALUE self,int &format,int &compression)
 				compression=ARCHIVE_COMPRESSION_BZIP2;
 			}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
 				format=ARCHIVE_FORMAT_TAR_USTAR;
+		}else{
+			format = _self->format;
+			compression = _self->compression;
 		}
 	}
 	if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
@@ -210,6 +221,7 @@ int Archive_write_set_compression(struct archive *data,int compression)
  *          be guessed from the file extension. Possible formats are: 
  *          * :ar
  *          * :tar
+ *          * :pax
  *          * :xar
  *          * :zip
  * [compression] Symbol inidicating the compression you want to use. If 
@@ -233,6 +245,10 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 	rb_scan_args(argc, argv, "12", &path,&r_format,&r_compression);
 	if(rb_obj_is_kind_of(path,rb_cIO)){
 		_self->fd = NUM2INT(rb_funcall(path,rb_intern("fileno"),0));
+		_self->type = archive_fd;
+		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
+	}else if(rb_obj_is_kind_of(path,rb_cInteger)){
+		_self->fd = NUM2INT(path);
 		_self->type = archive_fd;
 		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
 	}else if(rb_respond_to(path,rb_intern("read"))){
@@ -260,6 +276,8 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 			rb_raise(rb_eTypeError,"exepted Symbol");
 		if(SYM2ID(r_format) == rb_intern("tar"))
 			format = ARCHIVE_FORMAT_TAR_GNUTAR;
+		else if(SYM2ID(r_format) == rb_intern("pax"))
+			format = ARCHIVE_FORMAT_TAR_PAX_INTERCHANGE;
 		else if(SYM2ID(r_format) == rb_intern("zip"))
 			format = ARCHIVE_FORMAT_ZIP;
 		else if(SYM2ID(r_format) == rb_intern("ar"))
@@ -991,10 +1009,142 @@ VALUE Archive_compression_name(VALUE self)
 	return name ? rb_str_new2(name) : Qnil	;
 }
 
+//key is the entry and val is
+int Archive_add_hash_block(VALUE key,VALUE val,struct archive *obj){
+	char buff[8192];
+	size_t bytes_read;
+	int fd=-1;
+	struct archive *file = archive_read_disk_new();
+	archive_read_disk_set_standard_lookup(file);
+	struct archive_entry *entry = archive_entry_new();
+	archive_entry_copy_pathname(entry, rb_string_value_cstr(&key));
+	if(rb_obj_is_kind_of(val,rb_cFile)){
+		VALUE pathname = rb_funcall(val,rb_intern("path"),0); //source path
+		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
+		archive_entry_copy_sourcepath(entry, rb_string_value_cstr(&obj2));
+		fd = NUM2INT(rb_funcall(val,rb_intern("fileno"),0));
+	}else if(rb_obj_is_kind_of(val,rb_cIO)){
+		fd = NUM2INT(rb_funcall(val,rb_intern("fileno"),0));
+	}else if(rb_respond_to(val,rb_intern("read"))){
+		//stringio has neigther path or fileno, so do nothing
+	}else {
+		VALUE obj2 = rb_file_s_expand_path(1,&val);
+		archive_entry_copy_sourcepath(entry, rb_string_value_cstr(&obj2));
+		fd = open(rb_string_value_cstr(&obj2), O_RDONLY);
+		if (fd < 0) //TODO: add error
+			return 0;
+	}
+
+	if(fd > 0)
+		archive_read_disk_entry_from_file(file, entry, fd, NULL);
+	if(rb_block_given_p()){
+		VALUE temp = wrap(entry);
+		VALUE result = rb_yield(temp);
+		if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
+			archive_write_header(obj, wrap<archive_entry*>(result));
+		else
+			archive_write_header(obj, wrap<archive_entry*>(temp));
+	} else
+		archive_write_header(obj, entry);
+	if(fd < 0 and rb_respond_to(val,rb_intern("read"))){
+		VALUE result = rb_funcall(val,rb_intern("read"),0);
+		archive_write_data(obj, rb_string_value_cstr(&result), RSTRING_LEN(result));
+	}else{
+		while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
+			archive_write_data(obj, buff, bytes_read);
+	}
+	archive_write_finish_entry(obj);
+	if(fd >= 0 and !rb_obj_is_kind_of(val,rb_cIO))
+		close(fd);
+	archive_read_finish(file);
+	return 0;
+}
+
+VALUE Archive_add_block(struct add_obj *obj )
+{
+	VALUE robj = obj->obj;
+	char buff[8192];
+	size_t bytes_read;
+	archive_read_disk_set_standard_lookup(obj->file);
+	if(rb_obj_is_kind_of(robj,rb_cArray)){
+		for(int i=0;i< RARRAY_LEN(robj);i++){
+			VALUE temp = RARRAY_PTR(robj)[i];
+			int fd = -1;
+			char *sourcepath,*pathname;
+			if(rb_obj_is_kind_of(temp,rb_cFile)){
+				VALUE rpath = rb_funcall(temp,rb_intern("path"),0); //source path
+				pathname = rb_string_value_cstr(&rpath);
+				VALUE obj2 = rb_file_s_expand_path(1,&rpath);
+				sourcepath = rb_string_value_cstr(&obj2);
+				fd = NUM2INT(rb_funcall(temp,rb_intern("fileno"),0));
+			}else{
+				VALUE obj2 = rb_file_s_expand_path(1,&temp);
+				sourcepath = pathname = rb_string_value_cstr(&obj2);
+				fd = open(pathname, O_RDONLY);
+				if (fd < 0) //TODO: add error
+					return Qnil;
+			}
+			struct archive_entry *entry = archive_entry_new();
+			archive_entry_copy_sourcepath(entry, sourcepath);
+			archive_entry_copy_pathname(entry, pathname);
+			archive_read_disk_entry_from_file(obj->file, entry, fd, NULL);
+			if(rb_block_given_p()){
+				VALUE temp = wrap(entry);
+				VALUE result = rb_yield(temp);
+				if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
+					archive_write_header(obj->archive, wrap<archive_entry*>(result));
+				else
+					archive_write_header(obj->archive, wrap<archive_entry*>(temp));
+			} else
+				archive_write_header(obj->archive, entry);
+			while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
+				archive_write_data(obj->archive, buff, bytes_read);
+			archive_write_finish_entry(obj->archive);
+			if(fd >= 0 and !rb_obj_is_kind_of(robj,rb_cIO))
+				close(fd);
+		}
+	}else if(rb_obj_is_kind_of(robj,rb_cHash))
+		rb_hash_foreach(robj,(int (*)(...))Archive_add_hash_block,(VALUE)obj->archive);
+	else {
+		if(obj->fd > 0)
+			archive_read_disk_entry_from_file(obj->file, obj->entry, obj->fd, NULL);
+		if(rb_block_given_p()){
+			VALUE temp = wrap(obj->entry);
+			VALUE result = rb_yield(temp);
+			if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
+				archive_write_header(obj->archive, wrap<archive_entry*>(result));
+			else
+				archive_write_header(obj->archive, wrap<archive_entry*>(temp));
+		} else
+			archive_write_header(obj->archive, obj->entry);
+		if(obj->fd < 0 and rb_respond_to(robj,rb_intern("read"))){
+			VALUE result = rb_funcall(robj,rb_intern("read"),0);
+			archive_write_data(obj->archive, rb_string_value_cstr(&result), RSTRING_LEN(result));
+		}else{
+			while ((bytes_read = read(obj->fd, buff, sizeof(buff))) > 0)
+				archive_write_data(obj->archive, buff, bytes_read);
+		}
+		archive_write_finish_entry(obj->archive);
+	}
+	return Qnil;
+}
+
+VALUE Archive_add_block_ensure(struct add_obj *obj )
+{
+		archive_read_finish(obj->file);
+		archive_write_finish(obj->archive);
+		return Qnil;
+}
+
 /*
  * call-seq:
- *   add( obj , path ) → self
- * 
+ *   add( obj [, path] ) → self
+ *   add( obj [, path] ) {|entry| } → self
+ *   add( [obj, ... ] ) → self
+ *   add( [obj, ... ] ) {|entry| } → self
+ *   add( { path => obj} ) → self
+ *   add( { path => obj} ) {|entry| } → self
+ *
  * Adds a file to an archive.
  * ===Parameters
  * [obj]  String, IO, File or an object which responds to +read+. 
@@ -1005,13 +1155,28 @@ VALUE Archive_compression_name(VALUE self)
  * [FormatError] Raised if the archive format is not supported for writing. 
 */
 
-VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
+VALUE Archive_add(int argc, VALUE *argv, VALUE self)//(VALUE self,VALUE obj,VALUE name)
 {	
+	VALUE obj,name;
+	rb_scan_args(argc, argv, "11", &obj,&name);
+	if(NIL_P(name)){
+		if(rb_obj_is_kind_of(obj,rb_cFile))
+			name = rb_funcall(name,rb_intern("path"),0);
+		else if(rb_obj_is_kind_of(obj,rb_cIO))
+			rb_scan_args(argc, argv, "20", &obj,&name);
+		else if(rb_respond_to(obj,rb_intern("read")))
+			rb_scan_args(argc, argv, "20", &obj,&name);
+		else if(rb_obj_is_kind_of(obj,rb_cArray) or rb_obj_is_kind_of(obj,rb_cHash))
+			rb_scan_args(argc, argv, "10", &obj);
+		else
+			name = obj;
+	}
+	
 	char buff[8192];
 	char *path = NULL;
 
 	size_t bytes_read;
-	struct archive *a = archive_read_new(),*b=archive_write_new(),*c=archive_read_disk_new();
+	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
 	std::vector<struct archive_entry *> entries;
 	std::vector<std::string> allbuff;
@@ -1036,14 +1201,14 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 		compression = archive_compression(a);
 		archive_read_finish(a);
 	}
-	if(rb_obj_is_kind_of(obj,rb_cIO)){
-		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
-	}else if(rb_obj_is_kind_of(obj,rb_cFile)){
+	if(rb_obj_is_kind_of(obj,rb_cFile)){
 		VALUE pathname = rb_funcall(obj,rb_intern("path"),0); //source path
 		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
 		path = rb_string_value_cstr(&obj2);
 		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
-	}else if(rb_respond_to(obj,rb_intern("read"))){
+	}else if(rb_obj_is_kind_of(obj,rb_cIO)){
+		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
+	}else if(rb_respond_to(obj,rb_intern("read")) or rb_obj_is_kind_of(obj,rb_cArray) or rb_obj_is_kind_of(obj,rb_cHash)){
 		//stringio has neigther path or fileno, so do nothing
 	}else {
 		VALUE obj2 = rb_file_s_expand_path(1,&obj);
@@ -1058,7 +1223,7 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 	Archive_write_set_compression(b,compression);
 	
 	error=Archive_write_ruby(self,b);
-	if(error==ARCHIVE_OK){	
+	if(error==ARCHIVE_OK){
 		for(unsigned int i=0; i<entries.size(); i++){
 			if(std::string(rb_string_value_cstr(&name)).compare(archive_entry_pathname(entries[i]))!=0){
 				archive_write_header(b,entries[i]);
@@ -1066,25 +1231,22 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 				archive_write_finish_entry(b);
 			}
 		}
-		archive_read_disk_set_standard_lookup(c);
 		entry = archive_entry_new();
 		if (path)
 			archive_entry_copy_sourcepath(entry, path);
-		archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
-		if(fd < 0 and rb_respond_to(obj,rb_intern("read"))){
-			archive_write_header(b, entry);
-			VALUE result;
-			result = rb_funcall(obj,rb_intern("read"),0);
-			archive_write_data(b, rb_string_value_cstr(&result), RSTRING_LEN(result));
-		}else{
-			archive_read_disk_entry_from_file(c, entry, fd, NULL);
-			archive_write_header(b, entry);
-			while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
-				archive_write_data(b, buff, bytes_read);
-		}
-		archive_write_finish_entry(b);
-		archive_read_finish(c);
-		archive_write_finish(b);
+		if(!NIL_P(name))
+			archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
+
+		add_obj temp;
+		temp.archive = b;
+		temp.file = archive_read_disk_new();
+		temp.entry = entry;
+		temp.fd = fd;
+		temp.obj = obj;
+		//if(rb_obj_is_kind_of(obj,rb_cHash))
+		//	rb_hash_foreach(obj,(int (*)(...))Archive_add_hash_block,(VALUE)&temp);
+		//else
+			RB_ENSURE(Archive_add_block,&temp,Archive_add_block_ensure,&temp);
 	}
 	
 	if(fd >= 0 and !rb_obj_is_kind_of(name,rb_cIO))
@@ -1107,10 +1269,7 @@ VALUE Archive_add(VALUE self,VALUE obj,VALUE name)
 */
 VALUE Archive_add_shift(VALUE self,VALUE name)
 {
-	if(rb_obj_is_kind_of(name,rb_cFile))
-		return Archive_add(self,name,rb_funcall(name,rb_intern("path"),0));
-	else
-		return Archive_add(self,name,name);
+	return Archive_add(1,&name,self);
 }
 
 /*
@@ -1511,7 +1670,7 @@ extern "C" void Init_archive(void){
 	
 	//rb_define_method(rb_cArchive,"move_to",RUBY_METHOD_FUNC(Archive_move_to),1);
 
-	rb_define_method(rb_cArchive,"add",RUBY_METHOD_FUNC(Archive_add),2);
+	rb_define_method(rb_cArchive,"add",RUBY_METHOD_FUNC(Archive_add),-1);
 	rb_define_method(rb_cArchive,"<<",RUBY_METHOD_FUNC(Archive_add_shift),1);
 	
 	rb_define_method(rb_cArchive,"inspect",RUBY_METHOD_FUNC(Archive_inspect),0);

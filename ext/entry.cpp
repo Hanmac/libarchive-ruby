@@ -472,18 +472,50 @@ VALUE ArchiveEntry_inspect(VALUE self){
 
 //ACL added later with acl gem
 
-VALUE ArchiveEntry_acl(VALUE self){
-	archive_entry_acl_reset(_self,ARCHIVE_ENTRY_ACL_TYPE_ACCESS);
-	int type,permset,tag,qual;
-	const char* name;
-	while(archive_entry_acl_next(_self, ARCHIVE_ENTRY_ACL_TYPE_DEFAULT,&type, &permset, &tag,&qual, &name) == 0){
-		rb_warn("%i %i %i %s",permset,tag,qual,name);
-	}
+VALUE ArchiveEntry_access_acl(VALUE self){
+	if(rb_const_defined(rb_cObject,rb_intern("ACL"))){
+		VALUE rb_cAcl = rb_const_get(rb_cObject,rb_intern("ACL"));
+		VALUE rb_cAclEntry = rb_const_get(rb_cObject,rb_intern("Entry"));
+		VALUE result = rb_class_new_instance(0,NULL,rb_cAcl);
+		archive_entry_acl_reset(_self,ARCHIVE_ENTRY_ACL_TYPE_ACCESS);
+		int type,permset,tag,qual;
+		const char* name;
+		while(archive_entry_acl_next(_self, ARCHIVE_ENTRY_ACL_TYPE_ACCESS,&type, &permset, &tag,&qual, &name) == 0){
+			VALUE entry;
+			VALUE temp[3];
+			switch(tag){
+			case ARCHIVE_ENTRY_ACL_USER:
+			case ARCHIVE_ENTRY_ACL_USER_OBJ:
+				temp[0] = ID2SYM(rb_intern("user"));
+				break;
+			case ARCHIVE_ENTRY_ACL_GROUP:
+			case ARCHIVE_ENTRY_ACL_GROUP_OBJ:
+				temp[0] = ID2SYM(rb_intern("group"));
+				break;
+			case ARCHIVE_ENTRY_ACL_MASK:
+				temp[0] = ID2SYM(rb_intern("mask"));
+				break;
+			case ARCHIVE_ENTRY_ACL_OTHER:
+				temp[0] = ID2SYM(rb_intern("other"));
+				break;
+			}
+			temp[1] = INT2NUM(permset);
+			switch(tag){
+			case ARCHIVE_ENTRY_ACL_USER:
+			case ARCHIVE_ENTRY_ACL_GROUP:
+				temp[2] = INT2NUM(qual);
+				entry=rb_class_new_instance(3,temp,rb_cAclEntry);
+				break;
+			default:
+				entry=rb_class_new_instance(2,temp,rb_cAclEntry);
+				break;
+			}
+			rb_funcall(result,rb_intern("<<"),1,entry);
+		}
+		return result;
+	}else
+		rb_raise(rb_eNotImpError,"this function require the libacl-ruby gem!");
 	return Qnil;
-}
-
-VALUE ArchiveEntry_access_acl_count(VALUE self){
-	return INT2NUM(archive_entry_acl_count(_self,ARCHIVE_ENTRY_ACL_TYPE_ACCESS));
 }
 
 VALUE ArchiveEntry_acl_add(VALUE self){
@@ -492,17 +524,14 @@ VALUE ArchiveEntry_acl_add(VALUE self){
 	return self;
 }
 
-/* TODO does not work
+
 VALUE ArchiveEntry_initialize_copy(VALUE self,VALUE source)
 {
-	VALUE result = rb_call_super(1,&source);
-	archive_entry* vself = _self;
-	archive_entry* vsource = archive_entry_clone(wrap<archive_entry*>(source));
-	*vself = *vsource;
-	
-	return result;
+	rarchive_entry  *file;
+  Data_Get_Struct( self, rarchive_entry, file);
+  file->entry = archive_entry_clone(wrap<archive_entry*>(source));
+	return self;
 }
-*/
 
 
 /* Document-attr: atime
@@ -531,7 +560,7 @@ void Init_archive_entry(VALUE rb_cArchive){
 	#endif
 	rb_cArchiveEntry = rb_define_class_under(rb_cArchive,"Entry",rb_cObject);
 	rb_define_alloc_func(rb_cArchiveEntry,ArchiveEntry_alloc);
-	//rb_define_private_method(rb_cArchiveEntry,"initialize_copy",RUBY_METHOD_FUNC(ArchiveEntry_initialize_copy),1);
+	rb_define_private_method(rb_cArchiveEntry,"initialize_copy",RUBY_METHOD_FUNC(ArchiveEntry_initialize_copy),1);
 	rb_define_method(rb_cArchiveEntry,"inspect",RUBY_METHOD_FUNC(ArchiveEntry_inspect),0);
 	
 	rb_define_method(rb_cArchiveEntry,"gname",RUBY_METHOD_FUNC(ArchiveEntry_gname),0);
@@ -581,11 +610,8 @@ void Init_archive_entry(VALUE rb_cArchive){
 	rb_define_method(rb_cArchiveEntry,"<=>",RUBY_METHOD_FUNC(ArchiveEntry_compare),1);
 	
 	rb_define_alias(rb_cArchiveEntry,"to_s","path");
-/*	
-	//rb_define_method(rb_cArchiveEntry,"acl",RUBY_METHOD_FUNC(ArchiveEntry_acl),0);
-	//rb_define_method(rb_cArchiveEntry,"acl_add",RUBY_METHOD_FUNC(ArchiveEntry_acl_add),0);
-		
-	//rb_define_method(rb_cArchiveEntry,"access_acl_count",RUBY_METHOD_FUNC(ArchiveEntry_access_acl_count),0);
+//*	
+	rb_define_method(rb_cArchiveEntry,"access_acl",RUBY_METHOD_FUNC(ArchiveEntry_access_acl),0);
 //*/
 	
 

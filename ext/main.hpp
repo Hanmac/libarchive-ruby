@@ -28,6 +28,7 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 #include <fcntl.h>
 #include <string>
 extern VALUE rb_cArchive,rb_cArchiveEntry;
+
 void Init_archive_entry(VALUE m);
 
 template <typename T>
@@ -50,6 +51,10 @@ struct rarchive{
 	int compression;
 };
 
+struct rarchive_entry{
+	archive_entry *entry;
+};
+
 template <>
 inline VALUE wrap< rarchive >(rarchive *file )
 {
@@ -69,7 +74,10 @@ inline rarchive* wrap< rarchive* >(const VALUE &vfile)
 template <>
 inline VALUE wrap< archive_entry >(struct archive_entry *entry )
 {
-	return Data_Wrap_Struct(rb_cArchiveEntry, NULL, NULL, archive_entry_clone(entry));
+	rarchive_entry *temp = new rarchive_entry;
+	//archive_entry other = archive_entry_clone(entry);
+	temp->entry = archive_entry_clone(entry);
+	return Data_Wrap_Struct(rb_cArchiveEntry, NULL, free, temp);
 }
 
 template <>
@@ -77,9 +85,9 @@ inline archive_entry* wrap< archive_entry* >(const VALUE &vfile)
 {
 	if ( ! rb_obj_is_kind_of(vfile, rb_cArchiveEntry) )
 		return NULL;
-	archive_entry *file;
-  Data_Get_Struct( vfile, archive_entry, file);
-	return file;
+	rarchive_entry  *file;
+  Data_Get_Struct( vfile, rarchive_entry, file);
+	return file->entry;
 }
 
 #endif /* __RubyAchiveMain_H__ */
