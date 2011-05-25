@@ -13,7 +13,7 @@ know more? Keep reading!
 
 In order to successfully install libarchive-ruby, you need the following: 
 
-* Ruby >= 1.8.7
+* Ruby >= 1.9.2
 * A C++ compiler (we use the {GNU project's}[http://www.gnu.org] <tt>g++</tt>)
 * libarchive (we tested with 2.8.4)
 

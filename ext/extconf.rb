@@ -32,7 +32,10 @@ find_header("archive.h")
 $CFLAGS += " -Wall"
 
 unless have_func("rb_string_value_cstr","ruby.h")
-	abort("missing VALUE to char convert!")
+	abort("missing VALUE to char* convert!")
+end
+unless have_macro("RETURN_ENUMERATOR","ruby.h")
+	abort("missing the return Enumerator macro.")
 end
 
 create_makefile("archive")
