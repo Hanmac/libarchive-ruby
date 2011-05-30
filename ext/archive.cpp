@@ -30,6 +30,10 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 
 //TODO: handle string IO as archive Archive.new(stringio)
 
+#ifndef rb_proc_arity
+	#define rb_proc_arity(obj) 2
+#endif
+
 
 VALUE rb_cArchive,rb_eArchiveError,rb_eArchiveErrorFormat,rb_eArchiveErrorCompression;
 

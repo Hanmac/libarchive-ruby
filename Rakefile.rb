@@ -40,7 +40,7 @@ spec = Gem::Specification.new do |s|
 libarchive-ruby provides Ruby bindings for the libarchive library that 
 allows you to alter arbitrary archives. 
 DESCRIPTION
-  s.version = "0.0.2"
+  s.version = "0.0.3"
   s.author = "Hanmac"
   s.email = "hanmac@gmx.de"
   s.platform = Gem::Platform::RUBY

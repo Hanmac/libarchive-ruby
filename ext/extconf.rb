@@ -37,5 +37,6 @@ end
 unless have_macro("RETURN_ENUMERATOR","ruby.h")
 	abort("missing the return Enumerator macro.")
 end
+have_func("rb_proc_arity","ruby.h")
 
 create_makefile("archive")
