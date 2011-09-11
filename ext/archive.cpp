@@ -90,8 +90,7 @@ int rubymyopen(struct archive *a, void *client_data)
 	rb_funcall((VALUE)client_data,rb_intern("rewind"),0);
 	return ARCHIVE_OK;
 }
-ssize_t
-rubymyread(struct archive *a, void *client_data, const void **buff)
+ssize_t rubymyread(struct archive *a, void *client_data, const void **buff)
 {
 	VALUE result =  rb_funcall((VALUE)client_data,rb_intern("read"),0);
 	if(result == Qnil){
@@ -1242,11 +1241,15 @@ VALUE Archive_add(int argc, VALUE *argv, VALUE self)//(VALUE self,VALUE obj,VALU
 	}else if(rb_respond_to(obj,rb_intern("read")) or rb_obj_is_kind_of(obj,rb_cArray) or rb_obj_is_kind_of(obj,rb_cHash)){
 		//stringio has neigther path or fileno, so do nothing
 	}else {
-		VALUE obj2 = rb_file_s_expand_path(1,&obj);
-		path = rb_string_value_cstr(&obj2);
-		fd = open(path, O_RDONLY);
-		if (fd < 0) //TODO: add error
-			return self;
+		if(RBOOL(rb_funcall(rb_cFile,rb_intern("directory?"),1,rb_str_new2("."))))
+			obj = rb_funcall(rb_cDir,rb_intern("glob"),1,rb_str_new2("**/**/*"));
+		else{
+			VALUE obj2 = rb_file_s_expand_path(1,&obj);
+			path = rb_string_value_cstr(&obj2);
+			fd = open(path, O_RDONLY);
+			if (fd < 0) //TODO: add error
+				return self;
+		}
 	}
 	Archive_format_from_path(self,format,compression);
 	if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)

@@ -23,20 +23,29 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 
 require 'mkmf'
 
-dir_config("archive")
-pkg_config("libarchive")
-find_library("archive","main")
-find_header("archive.h")
 
+
+dir_config("archive")
+with_cflags("-x c++"){
+	pkg_config("libarchive")
+	unless(find_library("archive","main") && find_header("archive.h"))
+		abort("libarchive dev files")
+	end
+	CONFIG["warnflags"] = RbConfig::CONFIG["warnflags"] = " -Wall"
+
+	unless have_func("rb_string_value_cstr","ruby.h")
+		abort("missing VALUE to char* convert!")
+	end
+	unless have_macro("RETURN_ENUMERATOR","ruby.h")
+		abort("missing the return Enumerator macro.")
+	end
+	have_func("rb_proc_arity","ruby.h")
+	have_func("archive_read_support_format_raw","archive.h")
+
+}
 
 $CFLAGS += " -Wall"
 
-unless have_func("rb_string_value_cstr","ruby.h")
-	abort("missing VALUE to char* convert!")
-end
-unless have_macro("RETURN_ENUMERATOR","ruby.h")
-	abort("missing the return Enumerator macro.")
-end
-have_func("rb_proc_arity","ruby.h")
+create_header
 
 create_makefile("archive")
