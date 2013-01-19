@@ -24,7 +24,7 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 require "rake"
 gem "rdoc" #Ruby's internal RDoc is not really good
 require "rdoc/task"
-require "rake/gempackagetask"
+require "rubygems/package_task"
 require "rake/testtask"
 require "rake/clean"
 
@@ -55,7 +55,8 @@ DESCRIPTION
   s.rdoc_options << "-t" << "libarchive-ruby RDocs" << "-m" << "README.rdoc"
   #s.homepage = "http://hanmac.com/libarchive-ruby
 end
-Rake::GemPackageTask.new(spec).define
+
+Gem::PackageTask.new(spec).define
 
 Rake::RDocTask.new do |rd|
   rd.rdoc_files.include("COPYING.txt", "lib/**/*.rb", "ext/**/*.cpp", "ext/**/*.hpp", "**/*.rdoc")

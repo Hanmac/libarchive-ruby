@@ -23,6 +23,9 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 #ifndef __RubyAchiveMain_H__
 #define __RubyAchiveMain_H__
 #include <ruby.h>
+#if HAVE_RUBY_ENCODING_H
+#include <ruby/encoding.h>
+#endif
 #include <archive.h>
 #include <archive_entry.h>
 #include <fcntl.h>
