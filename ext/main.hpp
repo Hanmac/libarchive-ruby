@@ -51,7 +51,7 @@ struct rarchive{
 	int fd;
 	archive_type type;
 	int format;
-	int compression;
+	int filter;
 };
 
 struct rarchive_entry{

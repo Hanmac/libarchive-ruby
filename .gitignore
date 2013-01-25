@@ -1,0 +1,17 @@
+doc/
+html/
+pkg/
+*~
+# Ignore compilation products
+*.o
+*.so
+
+#eclipse project files
+.cproject
+.project
+
+# Ignore mkmf-generated files
+ext/Makefile
+ext/extconf.h
+ext/mkmf.log
+

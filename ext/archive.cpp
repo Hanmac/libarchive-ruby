@@ -22,6 +22,7 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 
 #include "main.hpp"
 #include <vector>
+#include <map>
 #include <exception>
 #include <stdexcept> 
 #define _self wrap<rarchive*>(self)
@@ -38,6 +39,14 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 typedef std::vector<struct archive_entry *> EntryVector;
 typedef std::vector<std::string> BuffVector;
 typedef std::vector<int> IntVector;
+
+typedef std::map<ID,int> SymToIntType;
+SymToIntType SymToFormat;
+SymToIntType SymToFilter;
+
+typedef std::map<std::string,std::pair<int,int> > FileExtType;
+
+FileExtType fileExt;
 
 VALUE rb_cArchive,rb_eArchiveError,rb_eArchiveErrorFormat,rb_eArchiveErrorCompression;
 
@@ -62,19 +71,30 @@ struct extract_obj {
 
 struct write_obj {
 	struct archive* archive;
-	std::vector<struct archive_entry *> *entries;
-	std::vector<std::string> *allbuff;
+	EntryVector *entries;
+	BuffVector *allbuff;
 };
 
 struct add_obj {
 	struct archive* archive;
 	struct archive* file;
 	struct archive_entry* entry;
-	std::vector<struct archive_entry *> *entries;
-	std::vector<std::string> *allbuff;
+	EntryVector *entries;
+	BuffVector *allbuff;
 	int fd;
 	VALUE obj;
 };
+
+
+VALUE wrap_data(const std::string &str)
+{
+#if HAVE_RUBY_ENCODING_H
+	return rb_external_str_new_with_enc(&str[0],str.length(),rb_filesystem_encoding());
+#else
+	return rb_str_new(&str[0],str.length());
+#endif
+}
+
 
 
 VALUE Archive_read_block_ensure(struct archive * data)
@@ -99,7 +119,7 @@ ssize_t rubymyread(struct archive *a, void *client_data, const void **buff)
 	VALUE result =  rb_funcall((VALUE)client_data,rb_intern("read"),0);
 	if(result == Qnil){
 		*buff = NULL;
-		return 0;  	
+		return 0;
 	}else{
 		if (RSTRING_LEN(result))
 			*buff = RSTRING_PTR(result);
@@ -123,33 +143,59 @@ int rubymyclose(struct archive *a, void *client_data)
 
 namespace RubyArchive {
 
-void read_old_data(struct archive *a,EntryVector &entries,BuffVector &buffs, int &format, IntVector &filter)
+void read_get_filters(struct archive *a,IntVector &filters)
+{
+	size_t filtercount = archive_filter_count(a);
+	for(size_t i = 0; i < filtercount; ++i)
+		filters.push_back(archive_filter_code(a,i));
+}
+
+void read_data(struct archive *a,std::string &str)
 {
 		char buff[8192];
 		size_t bytes_read;
+	try{
+		while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+			str.append(buff,bytes_read);
+	} catch (...){
+		rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
+	}
+
+}
+
+void read_old_data(struct archive *a,EntryVector &entries,BuffVector &buffs, int &format, IntVector &filters)
+{
 		struct archive_entry *entry;
 		
 		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			format = archive_format(a);
-			//compression = archive_compression(a);
-
-			size_t filtercount = archive_filter_count(a);
-			if(filter.empty())
-				for(size_t i = 0; i < filtercount; ++i)
-					filter.push_back(archive_filter_code(a,i));
+			if(filters.empty())
+				read_get_filters(a,filters);
 			
 			entries.push_back(archive_entry_clone(entry));
 			buffs.push_back(std::string(""));
-			try{
-				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-					buffs.back().append(buff,bytes_read);
-			} catch (...){
-				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
-			}
+			read_data(a,buffs.back());
 		}
 		archive_read_finish(a);
 }
 
+
+bool match_entry(struct archive_entry *entry,VALUE name)
+{
+	const char *cstr = archive_entry_pathname(entry);
+	if(rb_obj_is_kind_of(name,rb_cArchiveEntry)){
+		return std::string(cstr).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0;
+	}else if(rb_obj_is_kind_of(name,rb_cRegexp)){
+		VALUE str = rb_str_new2(cstr);
+		return rb_reg_match(name,str)!=Qnil;
+	}else
+		name = rb_funcall(name,rb_intern("to_s"),0);
+		std::string str1(rb_string_value_cstr(&name)),str2(str1);
+		str2 += '/'; // dir ends of '/'
+		return str1.compare(cstr)==0 || str2.compare(cstr)==0;
+					
+	return false;
+}
 
 
 int write_set_filters(struct archive *data,const IntVector &filter)
@@ -166,32 +212,23 @@ int write_set_filters(struct archive *data,const IntVector &filter)
 }
 
 
-void Archive_format_from_path(VALUE self,int &format,int &compression)
+void Archive_format_from_path(VALUE self,int &format,IntVector &filters)
 {
-	if(format == ARCHIVE_FORMAT_EMPTY){
-		if(_self->type == archive_path){ 
-			std::string selfpath = _self->path;
-			if(selfpath.substr(selfpath.length()-7).compare(".tar.xz")==0 || selfpath.substr(selfpath.length()-4).compare(".txz")==0 ){
-				format=ARCHIVE_FORMAT_TAR_USTAR;
-				compression=ARCHIVE_COMPRESSION_XZ;
-			}else if(selfpath.substr(selfpath.length()-9).compare(".tar.lzma")==0 ){
-				format=ARCHIVE_FORMAT_TAR_USTAR;
-				compression=ARCHIVE_COMPRESSION_LZMA;
-			}else if(selfpath.substr(selfpath.length()-7).compare(".tar.gz")==0 || selfpath.substr(selfpath.length()-4).compare(".tgz")==0){
-				format=ARCHIVE_FORMAT_TAR_USTAR;
-				compression=ARCHIVE_COMPRESSION_GZIP;
-			}else if(selfpath.substr(selfpath.length()-8).compare(".tar.bz2")==0 || selfpath.substr(selfpath.length()-4).compare(".tbz")==0 || selfpath.substr(selfpath.length()-4).compare(".tb2")==0){
-				format=ARCHIVE_FORMAT_TAR_USTAR;
-				compression=ARCHIVE_COMPRESSION_BZIP2;
-			}else if(selfpath.substr(selfpath.length()-4).compare(".tar")==0)
-				format=ARCHIVE_FORMAT_TAR_USTAR;
-		}else{
-			format = _self->format;
-			compression = _self->compression;
+	if(_self->type == archive_path){
+		std::string selfpath = _self->path;
+		size_t selfpathlength = selfpath.length();
+		for(FileExtType::iterator it = fileExt.begin(); it != fileExt.end(); ++it) {
+			if(selfpath.rfind(it->first) + it->first.length() == selfpathlength) {
+				format = it->second.first;
+				filters.push_back(it->second.second);
+				return;
+			}
 		}
 	}
-	if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
-		format=ARCHIVE_FORMAT_TAR_USTAR;
+	
+	format = _self->format;
+	filters.push_back(_self->filter);
+	
 }
 
 int Archive_read_ruby(VALUE self,struct archive *data)
@@ -219,9 +256,15 @@ int Archive_read_ruby(VALUE self,struct archive *data)
 
 
 
-int Archive_write_ruby(VALUE self,struct archive *data)
+int Archive_write_ruby(VALUE self,struct archive *data,int format, const IntVector &filters)
 {
 	int error =0;
+	
+	if((error = archive_write_set_format(data,format)) != ARCHIVE_OK)
+		rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(data));
+		
+	RubyArchive::write_set_filters(data,filters);
+	
 	switch(_self->type){
 		case archive_path:
 			error = archive_write_open_filename(data,_self->path.c_str());
@@ -238,34 +281,6 @@ int Archive_write_ruby(VALUE self,struct archive *data)
 	return error;
 }
 
-int Archive_write_set_compression(struct archive *data,int compression)
-{
-	int error = 0;
-	switch(compression){
-		case ARCHIVE_COMPRESSION_NONE:
-			error = archive_write_set_compression_none(data);
-			break;
-		case ARCHIVE_COMPRESSION_GZIP:
-			error = archive_write_set_compression_gzip(data);
-			break;
-		case ARCHIVE_COMPRESSION_BZIP2:
-			error = archive_write_set_compression_bzip2(data);
-			break;
-		case ARCHIVE_COMPRESSION_COMPRESS:
-			error = archive_write_set_compression_compress(data);
-			break;
-		case ARCHIVE_COMPRESSION_LZMA:
-			error = archive_write_set_compression_lzma(data);
-			break;
-		case ARCHIVE_COMPRESSION_XZ:
-			error = archive_write_set_compression_xz(data);
-			break;
-		default:
-			rb_raise(rb_eArchiveErrorCompression,"unsupported compresstype");
-			break;	
-		}
-	return error;
-}
 /*
  *call-seq:
  *   new( path [, format [, compression ] ] ) → an_archive
@@ -298,20 +313,20 @@ int Archive_write_set_compression(struct archive *data,int compression)
  
 VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 {
-	VALUE path,r_format,r_compression;
-	rb_scan_args(argc, argv, "12", &path,&r_format,&r_compression);
+	VALUE path,r_format,r_filter;
+	rb_scan_args(argc, argv, "12", &path,&r_format,&r_filter);
 	if(rb_obj_is_kind_of(path,rb_cIO)){
 		_self->fd = NUM2INT(rb_funcall(path,rb_intern("fileno"),0));
 		_self->type = archive_fd;
-		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
+		rb_scan_args(argc, argv, "21", &path,&r_format,&r_filter);
 	}else if(rb_obj_is_kind_of(path,rb_cInteger)){
 		_self->fd = NUM2INT(path);
 		_self->type = archive_fd;
-		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
+		rb_scan_args(argc, argv, "21", &path,&r_format,&r_filter);
 	}else if(rb_respond_to(path,rb_intern("read"))){
 		_self->ruby = path;
 		_self->type = archive_ruby;
-		rb_scan_args(argc, argv, "21", &path,&r_format,&r_compression);
+		rb_scan_args(argc, argv, "21", &path,&r_format,&r_filter);
 	}else{
 		path = rb_file_s_expand_path(1,&path);
 		_self->path = std::string(rb_string_value_cstr(&path));
@@ -321,89 +336,59 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 	//to set the format the file must convert
 	if(!NIL_P(r_format)){
 	
-		char buff[8192];
-		//std::string selfpath =_self->path;
-		size_t bytes_read;
 		struct archive *a = archive_read_new(),*b=archive_write_new();
 		struct archive_entry *entry;
-		int format,compression,error=0;
-		std::vector<struct archive_entry *> entries;
-		std::vector<std::string> allbuff;
-		if(rb_obj_is_kind_of(r_format,rb_cSymbol)!=Qtrue)
-			rb_raise(rb_eTypeError,"exepted Symbol");
-		if(SYM2ID(r_format) == rb_intern("tar"))
-			format = ARCHIVE_FORMAT_TAR_GNUTAR;
-		else if(SYM2ID(r_format) == rb_intern("pax"))
-			format = ARCHIVE_FORMAT_TAR_PAX_INTERCHANGE;
-		else if(SYM2ID(r_format) == rb_intern("zip"))
-			format = ARCHIVE_FORMAT_ZIP;
-		else if(SYM2ID(r_format) == rb_intern("ar"))
-			format = ARCHIVE_FORMAT_AR_GNU;
-		else if(SYM2ID(r_format) == rb_intern("xar"))
-			format = ARCHIVE_FORMAT_XAR;
-		else
-			rb_raise(rb_eTypeError,"wrong format");
+		int format,filter;
+		EntryVector entries;
+		BuffVector allbuff;
 		
-		if(NIL_P(r_compression)){
-			compression = ARCHIVE_COMPRESSION_NONE;
-			error = archive_write_set_compression_none(b);
-		}else if(SYM2ID(r_compression) == rb_intern("gzip")){
-			compression =ARCHIVE_COMPRESSION_GZIP;
-			error = archive_write_set_compression_gzip(b);
-		}else if(SYM2ID(r_compression) == rb_intern("bzip2")){
-			compression =ARCHIVE_COMPRESSION_BZIP2;
-			error = archive_write_set_compression_bzip2(b);
-		}else if(SYM2ID(r_compression) == rb_intern("compress")){
-			compression =ARCHIVE_COMPRESSION_BZIP2;
-			error = archive_write_set_compression_compress(b);
-		}else if(SYM2ID(r_compression) == rb_intern("lzma")){
-			compression =ARCHIVE_COMPRESSION_LZMA;
-			error = archive_write_set_compression_lzma(b);
-		}else if(SYM2ID(r_compression) == rb_intern("xz")){
-			compression =ARCHIVE_COMPRESSION_XZ;
-			error = archive_write_set_compression_xz(b);
+		if(SYMBOL_P(r_format)){
+			SymToIntType::iterator it = SymToFormat.find(SYM2ID(r_format));
+			if(it != SymToFormat.end()) {
+				format = it->second;
+			}else
+				rb_raise(rb_eTypeError,"wrong format");
 		}else
-			rb_raise(rb_eTypeError,"unsupported compression");
-		
-		if(error)
-			rb_raise(rb_eArchiveError,"error (%d): %s ",archive_errno(b),archive_error_string(b));
+			rb_raise(rb_eTypeError,"exepted Symbol");
 			
-		archive_read_support_filter_all(a);
-		archive_read_support_format_all(a);
-		archive_read_support_format_raw(a);
-		//autodetect format and compression
-		error=Archive_read_ruby(self,a);
-		_self->format = format;
-		_self->compression = compression;
-		if(error==ARCHIVE_OK){
-			while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
-				if(format==archive_format(a) && compression==archive_compression(a)){
-					archive_read_finish(a);
-					return self;
-				}
-				entries.push_back(archive_entry_clone(entry));
-				allbuff.push_back(std::string(""));
-				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-					allbuff.back().append(buff,bytes_read);
-			}
-			archive_read_finish(a);
-		}
-		//format fix
-		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
+		if(NIL_P(r_filter)){
+			filter = ARCHIVE_FILTER_NONE;
+		}else if(SYMBOL_P(r_filter)){
+			SymToIntType::iterator it = SymToFilter.find(SYM2ID(r_filter));
+			if(it != SymToFilter.end()) {
+				filter = it->second;
+			} else
+				rb_raise(rb_eTypeError,"unsupported filter");
+		}else
+			rb_raise(rb_eTypeError,"exepted Symbol");
 		
-		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
-		error=Archive_write_ruby(self,b);
-		if(error==ARCHIVE_OK){
-			//write old data back
-			for(unsigned int i=0; i<entries.size(); i++){
-				archive_write_header(b,entries[i]);
-				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
-				archive_write_finish_entry(b);
-			}
-			archive_write_finish(b);
-		}
+		//autodetect format and compression
+
+		_self->format = format;
+		_self->filter = filter;
+		
+//		if(Archive_read_ruby(self,a)==ARCHIVE_OK){
+//			while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
+//				if(format==archive_format(a) && filter==archive_filter_code(a,0)){
+//					archive_read_finish(a);
+//					return self;
+//				}
+//				entries.push_back(archive_entry_clone(entry));
+//				allbuff.push_back(std::string(""));
+//				
+//				RubyArchive::read_data(a,allbuff.back());
+//			}
+//			archive_read_finish(a);
+//			if(Archive_write_ruby(self,b,format,IntVector(filter))==ARCHIVE_OK){
+//				//write old data back
+//				for(unsigned int i=0; i<entries.size(); i++){
+//					archive_write_header(b,entries[i]);
+//					archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
+//					archive_write_finish_entry(b);
+//				}
+//				archive_write_finish(b);
+//			}
+//		}
 	}
 	return self;
 }
@@ -433,16 +418,9 @@ VALUE Archive_each_block(struct archive *data)
 			rb_yield(temp);
 			archive_read_data_skip(data);
 		}else{
-			char buff[8192];
 			std::string str;
-			size_t bytes_read;
-			try {
-				while ((bytes_read=archive_read_data(data,&buff,sizeof(buff)))>0)
-					str.append(buff,bytes_read);
-			}catch(...){
-				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(data),archive_error_string(data));
-			}
-			rb_yield_values(2,temp,rb_external_str_new_with_enc(&str[0],str.length(),rb_filesystem_encoding()));
+			RubyArchive::read_data(data,str);
+			rb_yield_values(2,temp,wrap_data(str));
 		}
 	}
 	return Qnil;
@@ -515,10 +493,8 @@ VALUE Archive_each_entry(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
 	struct archive *a = archive_read_new();
-
 	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK)
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK)
 		return RB_ENSURE(Archive_each_entry_block,a,Archive_read_block_ensure,a);
 	return Qnil;
 }
@@ -528,16 +504,9 @@ VALUE Archive_each_data_block(struct archive *data)
 {
 	struct archive_entry *entry;
 	while (archive_read_next_header(data, &entry) == ARCHIVE_OK) {
-		char buff[8192];
 		std::string str;
-		size_t bytes_read;
-		try{
-			while ((bytes_read=archive_read_data(data,&buff,sizeof(buff)))>0)
-				str.append(buff,bytes_read);
-		} catch (...){
-			rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(data),archive_error_string(data));
-		}
-		rb_yield(rb_external_str_new_with_enc(&str[0],str.length(),rb_filesystem_encoding()));
+		RubyArchive::read_data(data,str);
+		rb_yield(wrap_data(str));
 	}
 	return Qnil;
 }
@@ -545,13 +514,13 @@ VALUE Archive_each_data_block(struct archive *data)
 
 /*
  * call-seq:
- *   each_data() {|data| }    → an_array
+ *   each_data() {|data| }    → self
  *   each_data()              → an_enumerator
  * 
  * Iterates through the archive and yields each entry's data as a string. 
  * This is the same as #each, but doesn't allow for the first block parameter. 
  * ===Return value
- * If a block is given, returns an array of String objects, otherwise an enumerator. 
+ * If a block is given, returns self, otherwise an enumerator. 
  * ===Example
  *   a.each{|data| puts "This is: '#{data}'"}
  * Output: 
@@ -563,15 +532,10 @@ VALUE Archive_each_data(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
 	struct archive *a = archive_read_new();
-
 	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK)
-		{
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK)
 		RB_ENSURE(Archive_each_data_block,a,Archive_read_block_ensure,a);
-		return self;
-		}
-	return Qnil;
+	return self;
 }
 
 VALUE Archive_each_filter_block(struct archive *data)
@@ -590,11 +554,8 @@ VALUE Archive_each_filter(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
 	struct archive *a = archive_read_new();
-
 	
-	int error=Archive_read_ruby(self,a);
-	
-	if(error==ARCHIVE_OK)
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK)
 		RB_ENSURE(Archive_each_filter_block,a,Archive_read_block_ensure,a);
 	return self;
 }
@@ -614,19 +575,11 @@ VALUE Archive_to_hash(VALUE self)
 	struct archive *a = archive_read_new();
 	struct archive_entry *entry;
 	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-			char buff[8192];
 			std::string str;
-			size_t bytes_read;
-			try{
-				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-					str.append(buff,bytes_read);
-			} catch (...){
-				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
-			}
-			rb_hash_aset(result,wrap(entry),rb_str_new2(str.c_str()));
+			RubyArchive::read_data(a,str);
+			rb_hash_aset(result,wrap(entry),wrap_data(str));
 		}
 		archive_read_finish(a);
 	}
@@ -691,34 +644,20 @@ VALUE Archive_map_block(struct write_obj * data){
 VALUE Archive_map_self(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
-	std::string selfpath =_self->path;
+
 	struct archive *a = archive_read_new(),*b=archive_write_new();
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
+	int format = ARCHIVE_FORMAT_EMPTY;
 	
 	EntryVector entries;
 	BuffVector buffs;
-	IntVector filter;
+	IntVector filters;
 	
-	
-	//autodetect format and compression
-	error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	//autodetect format and filters
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		
-		RubyArchive::read_old_data(a,entries,buffs, format, filter);
-		
-		
-		//format fix
-		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-		
-		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
-		
-		//Archive_write_set_compression(b,compression);
-		RubyArchive::write_set_filters(b,filter);
-		
-		error=Archive_write_ruby(self,b);
-		if(error==ARCHIVE_OK){
+		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+
+		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 			write_obj obj;
 			obj.archive = b;
 			obj.entries = &entries;
@@ -751,20 +690,9 @@ VALUE Archive_get(VALUE self,VALUE val)
 	struct archive *a = archive_read_new();
 	struct archive_entry *entry;
 	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-			bool find = false;
-			if(rb_obj_is_kind_of(val,rb_cRegexp)){
-				find = rb_reg_match(val,rb_str_new2(archive_entry_pathname(entry)))!=Qnil;
-			}else{
-				val = rb_funcall(val,rb_intern("to_s"),0);
-				std::string str1(rb_string_value_cstr(&val)),str2(str1);
-				str2 += '/'; // dir ends of '/'
-				const char *cstr = archive_entry_pathname(entry);
-				find = (str1.compare(cstr)==0 || str2.compare(cstr)==0);
-			}
-			if(find){
+			if(RubyArchive::match_entry(entry,val)){
 				VALUE result = wrap(entry);
 				archive_read_finish(a);
 				return result;
@@ -773,6 +701,20 @@ VALUE Archive_get(VALUE self,VALUE val)
 		archive_read_finish(a);
 	}
 	return Qnil;
+}
+
+
+void extract_extract(struct archive *a,struct archive_entry *entry,int extract_opt,VALUE io, int fd)
+{
+	char buff[8192];
+	size_t bytes_read;
+	if(rb_obj_is_kind_of(io,rb_cIO)){
+		archive_read_data_into_fd(a,fd);
+	}else if(rb_respond_to(io,rb_intern("write"))){
+		while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
+			rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
+	}else
+		archive_read_extract(a,entry,extract_opt);
 }
 /*
  * call-seq:
@@ -809,14 +751,12 @@ VALUE Archive_get(VALUE self,VALUE val)
 
 VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 {
-	char buff[8192];
-	size_t bytes_read;
 
 	VALUE result = rb_ary_new(),name,io,opts,temp;
 	struct archive *a = archive_read_new();
 	struct archive_entry *entry;
 	//add raw, this is not by all
-	int extract_opt = 0,fd=-1,error=0;
+	int extract_opt = 0,fd=-1;
 	rb_scan_args(argc, argv, "03", &name,&io,&opts);
 	if(rb_obj_is_kind_of(name,rb_cHash)){
 		opts = name;name = Qnil;
@@ -832,8 +772,7 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 		if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("extract")))))
 			extract_opt = NUM2INT(temp);
 			
-	error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		try{
 			if(NIL_P(name)){
 				if(!NIL_P(io)){
@@ -844,52 +783,10 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 					rb_ary_push(result,rb_str_new2(archive_entry_pathname(entry)));
 				}
 			}else{
-				if(rb_obj_is_kind_of(name,rb_cArchiveEntry)){
-					if(rb_obj_is_kind_of(io,rb_cIO)){
-						while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-							if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
-								archive_read_data_into_fd(a,fd);
-						}
-					}else if(rb_respond_to(io,rb_intern("write"))){
-						while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-							if(std::string(archive_entry_pathname(entry)).compare(archive_entry_pathname(wrap<archive_entry*>(name)))==0)
-								while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-									rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
-							
-						}
-					}else
-						archive_read_extract(a,wrap<archive_entry*>(name),extract_opt);
-					rb_ary_push(result,rb_str_new2(archive_entry_pathname(wrap<archive_entry*>(name))));
-				}else if(rb_obj_is_kind_of(name,rb_cRegexp)){
-					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-						VALUE str = rb_str_new2(archive_entry_pathname(entry));
-						if(rb_reg_match(name,str)!=Qnil){
-							if(rb_obj_is_kind_of(io,rb_cIO)){
-								archive_read_data_into_fd(a,fd);
-							}else if(rb_respond_to(io,rb_intern("write"))){
-								while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-										rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
-							}else
-								archive_read_extract(a,entry,extract_opt);
-							rb_ary_push(result,str);
-						}
-					}
-				}else{
-					name = rb_funcall(name,rb_intern("to_s"),0);
-					std::string str1(rb_string_value_cstr(&name)),str2(str1);
-					str2 += '/'; // dir ends of '/'
-					while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
-						const char *cstr = archive_entry_pathname(entry);
-						if(str1.compare(cstr)==0 || str2.compare(cstr)==0){
-							if(rb_obj_is_kind_of(io,rb_cIO)){
-								archive_read_data_into_fd(a,fd);
-							}else if(rb_respond_to(io,rb_intern("write"))){
-								while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-										rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
-							}else
-								archive_read_extract(a,entry,extract_opt);
-							rb_ary_push(result,rb_str_new2(cstr));
-						}
+				while(archive_read_next_header(a, &entry) == ARCHIVE_OK){
+					if(RubyArchive::match_entry(entry,name)){
+						extract_extract(a,entry,extract_opt,io,fd);
+						rb_ary_push(result,rb_str_new2(archive_entry_pathname(entry)));
 					}
 				}
 			}
@@ -937,14 +834,14 @@ VALUE Archive_extract_if(int argc, VALUE *argv, VALUE self)
 	VALUE opts,temp;
 	struct archive *a = archive_read_new();
 	
-	int extract_opt=0,error=0;
+	int extract_opt=0;
 	
 	rb_scan_args(argc, argv, "01", &opts);
 	if(rb_obj_is_kind_of(opts,rb_cHash))
 		if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("extract")))))
 			extract_opt = NUM2INT(temp);
-	error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		extract_obj obj;
 		obj.archive = a;
 		obj.extract_opt = extract_opt;
@@ -969,36 +866,9 @@ VALUE Archive_format(VALUE self)
 	struct archive_entry *entry;
 	VALUE result = Qnil;
 	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		result = INT2NUM(archive_format(a));
-		archive_read_finish(a);
-	}
-	return result;
-}
-
-/*
- * call-seq:
- *   compression() → an_integer or nil
- * 
- * Returns the archive compression as an integer. You should use 
- * #compression_name instead. 
- * ===Return value
- * An integer or nil if the compression wasn't detectable. 0 means 
- * no compression. 
-*/
-
-VALUE Archive_compression(VALUE self)
-{
-	struct archive *a = archive_read_new();
-	struct archive_entry *entry;
-	VALUE result = Qnil;
-	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
-		archive_read_next_header(a, &entry);
-		result = INT2NUM(archive_compression(a));
 		archive_read_finish(a);
 	}
 	return result;
@@ -1021,8 +891,7 @@ VALUE Archive_format_name(VALUE self)
 	struct archive_entry *entry;
 	const char* name = NULL;
 	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		if(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			name = archive_format_name(a);
 			archive_read_finish(a);
@@ -1031,34 +900,6 @@ VALUE Archive_format_name(VALUE self)
 	return name ? rb_str_new2(name) : Qnil	;
 }
 
-/*
- * call-seq:
- *   compression_name() → a_string or nil
- * 
- * Returns the archive compression's name as a string.
- * ===Return value
- * A string or nil if the compression format wasn't detectable. If there 
- * is no compression, <tt>"none"</tt> is returned. 
- * ===Example
- *   a.compression_name #=> "gzip"
- *   
- *   a.compression_name #=> "none"
-*/
-
-VALUE Archive_compression_name(VALUE self)
-{
-	struct archive *a = archive_read_new();
-	struct archive_entry *entry;
-	const char* name = NULL;
-	
-	int error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
-		archive_read_next_header(a, &entry);
-		name = archive_compression_name(a);
-		archive_read_finish(a);
-	}
-	return name ? rb_str_new2(name) : Qnil	;
-}
 
 //key is the entry and val is
 
@@ -1262,15 +1103,15 @@ VALUE Archive_add(int argc, VALUE *argv, VALUE self)//(VALUE self,VALUE obj,VALU
 
 	EntryVector entries;
 	BuffVector buffs;
-	IntVector filter;
+	IntVector filters;
 	
 
-	int format= ARCHIVE_FORMAT_EMPTY,compression=ARCHIVE_COMPRESSION_NONE,fd=-1,error=0;
+	int format= ARCHIVE_FORMAT_EMPTY,fd=-1;
 
 	
 	//autodetect format and compression
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
-		RubyArchive::read_old_data(a,entries,buffs, format, filter);
+		RubyArchive::read_old_data(a,entries,buffs, format, filters);
 	}
 	
 	if(rb_obj_is_kind_of(obj,rb_cFile)){
@@ -1283,23 +1124,23 @@ VALUE Archive_add(int argc, VALUE *argv, VALUE self)//(VALUE self,VALUE obj,VALU
 	}else if(rb_respond_to(obj,rb_intern("read")) or rb_obj_is_kind_of(obj,rb_cArray) or rb_obj_is_kind_of(obj,rb_cHash)){
 		//stringio has neigther path or fileno, so do nothing
 	}else {
-	//	if(RTEST(rb_funcall(rb_cFile,rb_intern("directory?"),1,rb_str_new2("."))))
-	//		obj = rb_funcall(rb_cDir,rb_intern("glob"),1,rb_str_new2("**/**/*"));
-	//	else{
+		if(RTEST(rb_funcall(rb_cFile,rb_intern("directory?"),1,obj)))
+			obj = rb_funcall(rb_cDir,rb_intern("glob"),1,rb_str_new2("**/**/*"));
+		else{
 			VALUE obj2 = rb_file_s_expand_path(1,&obj);
 			path = rb_string_value_cstr(&obj2);
 			fd = open(path, O_RDONLY);
 			if (fd < 0) //TODO: add error
 				return self;
-	//	}
+		}
 	}
-	Archive_format_from_path(self,format,compression);
-	if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-		rb_raise(rb_eArchiveErrorFormat,"error:%d:%s",archive_errno(b),archive_error_string(b));
-
-	RubyArchive::write_set_filters(b,filter);
+//	Archive_format_from_path(self,format,compression);
 	
-	if(Archive_write_ruby(self,b)==ARCHIVE_OK){
+	if(format == ARCHIVE_FORMAT_EMPTY){
+		Archive_format_from_path(self,format,filters);
+	}
+	
+	if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 		entry = archive_entry_new();
 		if (path)
 			archive_entry_copy_sourcepath(entry, path);
@@ -1356,61 +1197,33 @@ VALUE Archive_add_shift(VALUE self,VALUE name)
 
 VALUE Archive_delete(VALUE self,VALUE val)
 {
-	char buff[8192];
-	size_t bytes_read;
 	struct archive *a = archive_read_new(),*b=archive_write_new();
-	struct archive_entry *entry;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
-	std::vector<struct archive_entry *> entries;
-	std::vector<std::string> allbuff;
+	int format = ARCHIVE_FORMAT_EMPTY;
+	
+	EntryVector entries;
+	BuffVector buffs;
+	IntVector filters;
+	
 	VALUE result = rb_ary_new();
 	
 	//autodetect format and compression
-	error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
-		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
-			format = archive_format(a);
-			compression = archive_compression(a);
-			bool del = false;
-			if(rb_obj_is_kind_of(val,rb_cArchiveEntry)){
-				del = std::string(archive_entry_pathname(wrap<archive_entry*>(val))).compare(archive_entry_pathname(entry)) == 0;
-			}else if(rb_obj_is_kind_of(val,rb_cRegexp)){
-				VALUE str = rb_str_new2(archive_entry_pathname(entry));
-				del = rb_reg_match(val,str)!=Qnil;
-			}else {
-				std::string str1(rb_string_value_cstr(&val)),str2(str1);
-				str2 += '/'; // dir ends of '/'
-				const char *cstr = archive_entry_pathname(entry);
-				del = (str1.compare(cstr)==0 || str2.compare(cstr)==0);
-			}
-			if(!del){
-				entries.push_back(archive_entry_clone(entry));
-				allbuff.push_back(std::string(""));
-				try{
-					while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-						allbuff.back().append(buff,bytes_read);
-				}catch(...){
-					rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));	
-				}
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
+		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+
+		for(unsigned int i=0; i<entries.size();){
+			if(RubyArchive::match_entry(entries[i],val)){
+				rb_ary_push(result,rb_str_new2(archive_entry_pathname(entries[i])));
+				entries.erase(entries.begin() + i);
+				buffs.erase(buffs.begin() + i);
 			}else
-				rb_ary_push(result,wrap(archive_entry_clone(entry)));
+				++i;
 		}
-		archive_read_finish(a);
-	
-		//format fix
-		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-	
-		//TODO add archive-error
-		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
-		Archive_write_set_compression(b,compression);
-		error=Archive_write_ruby(self,b);
-		if(error==ARCHIVE_OK){
+
+		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 			//write old data back
 			for(unsigned int i=0; i<entries.size(); i++){
 				archive_write_header(b,entries[i]);
-				archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
+				archive_write_data(b,buffs[i].c_str(),buffs[i].length());
 				archive_write_finish_entry(b);
 			}
 			archive_write_finish(b);
@@ -1452,43 +1265,22 @@ VALUE Archive_delete_if_block(struct write_obj * data)
 VALUE Archive_delete_if(VALUE self)
 {
 	RETURN_ENUMERATOR(self,0,NULL);
-	char buff[8192];
-	std::string selfpath =_self->path;
-	size_t bytes_read;
+
 	struct archive *a = archive_read_new(),*b=archive_write_new();
-	struct archive_entry *entry;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
-	std::vector<struct archive_entry *> entries;
-	std::vector<std::string> allbuff;
+	int format = ARCHIVE_FORMAT_EMPTY;
 	
+	EntryVector entries;
+	BuffVector buffs;
+	IntVector filters;
 	
-	error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
-		while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
-			format = archive_format(a);
-			compression = archive_compression(a);
-			entries.push_back(archive_entry_clone(entry));
-			allbuff.push_back(std::string(""));
-			try{
-				while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
-					allbuff.back().append(buff,bytes_read);
-			}catch(...){
-				rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));	
-			}
-		}
-		archive_read_finish(a);
-		//format fix
-		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
-		Archive_write_set_compression(b,compression);
-		error=Archive_write_ruby(self,b);
-		if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
+		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+		
+		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 			write_obj obj;
 			obj.archive = b;
 			obj.entries = &entries;
-			obj.allbuff = &allbuff;
+			obj.allbuff = &buffs;
 			return RB_ENSURE(Archive_delete_if_block,&obj,Archive_write_block_ensure,b);
 		}	
 	}	
@@ -1509,29 +1301,18 @@ VALUE Archive_delete_if(VALUE self)
 VALUE Archive_clear(VALUE self)
 {
 
-	std::string selfpath =_self->path;
-
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	struct archive_entry *entry;
-	int format = ARCHIVE_FORMAT_EMPTY,compression = ARCHIVE_COMPRESSION_NONE,error=0;
+	int format = ARCHIVE_FORMAT_EMPTY;
 	
-	
-	error=Archive_read_ruby(self,a);
-	if(error==ARCHIVE_OK){
+	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		format = archive_format(a);
-		compression = archive_compression(a);
+		IntVector filters;
+		RubyArchive::read_get_filters(a,filters);
 		archive_read_finish(a);
-	
-		//format fix
-		if(format==ARCHIVE_FORMAT_TAR_GNUTAR)
-			format=ARCHIVE_FORMAT_TAR_USTAR;
-	
-		if((error = archive_write_set_format(b,format)) != ARCHIVE_OK)
-			rb_raise(rb_eArchiveErrorFormat,"error (%d): %s ",error,archive_error_string(b));
-		Archive_write_set_compression(b,compression);
-		error=Archive_write_ruby(self,b);
-		if(error==ARCHIVE_OK)
+		
+		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK)
 			archive_write_finish(b);
 	}
 	
@@ -1741,9 +1522,9 @@ extern "C" void Init_archive(void){
 	rb_define_method(rb_cArchive,"inspect",RUBY_METHOD_FUNC(Archive_inspect),0);
 	
 	rb_define_method(rb_cArchive,"format",RUBY_METHOD_FUNC(Archive_format),0);
-	rb_define_method(rb_cArchive,"compression",RUBY_METHOD_FUNC(Archive_compression),0);
+	//rb_define_method(rb_cArchive,"compression",RUBY_METHOD_FUNC(Archive_compression),0);
 	rb_define_method(rb_cArchive,"format_name",RUBY_METHOD_FUNC(Archive_format_name),0);
-	rb_define_method(rb_cArchive,"compression_name",RUBY_METHOD_FUNC(Archive_compression_name),0);
+	//rb_define_method(rb_cArchive,"compression_name",RUBY_METHOD_FUNC(Archive_compression_name),0);
 
 	rb_define_method(rb_cArchive,"unlink",RUBY_METHOD_FUNC(Archive_unlink),0);
 	rb_define_method(rb_cArchive,"exist?",RUBY_METHOD_FUNC(Archive_exist),0);
@@ -1768,4 +1549,38 @@ extern "C" void Init_archive(void){
 	rb_eArchiveError = rb_define_class_under(rb_cArchive,"Error",rb_eStandardError);
 	rb_eArchiveErrorFormat = rb_define_class_under(rb_eArchiveError,"Format",rb_eArchiveError);
 	rb_eArchiveErrorCompression = rb_define_class_under(rb_eArchiveError,"Compression",rb_eArchiveError);
+	
+	
+	SymToFormat[rb_intern("tar")]=ARCHIVE_FORMAT_TAR_GNUTAR;
+	SymToFormat[rb_intern("pax")]=ARCHIVE_FORMAT_TAR_PAX_INTERCHANGE;
+	SymToFormat[rb_intern("zip")]=ARCHIVE_FORMAT_ZIP;
+	SymToFormat[rb_intern("ar")]=ARCHIVE_FORMAT_AR_GNU;
+	SymToFormat[rb_intern("xar")]=ARCHIVE_FORMAT_XAR;
+	
+	SymToFilter[rb_intern("gzip")]=ARCHIVE_FILTER_GZIP;
+	SymToFilter[rb_intern("bzip2")]=ARCHIVE_FILTER_BZIP2;
+	SymToFilter[rb_intern("compress")]=ARCHIVE_FILTER_BZIP2;
+	SymToFilter[rb_intern("lzma")]=ARCHIVE_FILTER_LZMA;
+	SymToFilter[rb_intern("xz")]=ARCHIVE_FILTER_XZ;
+	
+	FileExtType::mapped_type pair;
+	
+	pair = std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_GZIP);
+	fileExt[".tar.gz"]=pair;
+	fileExt[".tgz"]=pair;
+	
+	pair = std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_BZIP2);
+	fileExt[".tar.bz2"]=pair;
+	fileExt[".tbz"]=pair;
+	fileExt[".tb2"]=pair;
+	
+	pair = std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_XZ);
+	fileExt[".tar.xz"]=pair;
+	fileExt[".txz"]=pair;
+	
+	fileExt[".tar.lzma"]=std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_LZMA);
+	
+	pair = std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_NONE);
+	fileExt[".tar"]=pair;
+	
 }
