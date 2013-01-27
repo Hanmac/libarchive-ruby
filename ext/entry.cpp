@@ -196,8 +196,7 @@ VALUE ArchiveEntry_set_uname(VALUE self,VALUE val)
  */
 VALUE ArchiveEntry_path(VALUE self)
 {
-	const char* str = archive_entry_pathname(_self);
-	return str ==NULL? Qnil : rb_str_new2(str);
+	return wrap(archive_entry_pathname(_self));
 }
 
 /*
@@ -208,8 +207,7 @@ VALUE ArchiveEntry_path(VALUE self)
  */
 VALUE ArchiveEntry_hardlink(VALUE self)
 {
-	const char* str = archive_entry_hardlink(_self);
-	return str ==NULL? Qnil : rb_str_new2(str);
+	return wrap(archive_entry_hardlink(_self));
 }
 
 /*
@@ -220,8 +218,7 @@ VALUE ArchiveEntry_hardlink(VALUE self)
  */
 VALUE ArchiveEntry_sourcepath(VALUE self)
 {
-	const char* str = archive_entry_sourcepath(_self);
-	return str ==NULL? Qnil : rb_str_new2(str);
+	return wrap(archive_entry_sourcepath(_self));
 }
 
 /*
@@ -232,8 +229,7 @@ VALUE ArchiveEntry_sourcepath(VALUE self)
  */
 VALUE ArchiveEntry_strmode(VALUE self)
 {
-	const char* str = archive_entry_strmode(_self);
-	return str ==NULL? Qnil : rb_str_new2(str);
+	return wrap(archive_entry_strmode(_self));
 }
 /*
  * call-seq:
@@ -243,8 +239,7 @@ VALUE ArchiveEntry_strmode(VALUE self)
  */
 VALUE ArchiveEntry_symlink(VALUE self)
 {
-	const char* str = archive_entry_symlink(_self);
-	return str ==NULL? Qnil : rb_str_new2(str);
+	return wrap(archive_entry_symlink(_self));
 }
 /*
  * call-seq:
@@ -551,13 +546,20 @@ VALUE ArchiveEntry_initialize_copy(VALUE self,VALUE source)
  */
 
 void Init_archive_entry(VALUE rb_cArchive){
-	#if(0)
-		rb_cArchive = rb_define_class("Archive",rb_cObject);
-		rb_define_attr(rb_cArchiveEntry,"atime",1,1);
-		rb_define_attr(rb_cArchiveEntry,"ctime",1,1);
-		rb_define_attr(rb_cArchiveEntry,"mtime",1,1);
-		rb_define_attr(rb_cArchiveEntry,"birthtime",1,1);
-	#endif
+#if 0
+	rb_cArchive = rb_define_class("Archive",rb_cObject);
+
+	rb_define_attr(rb_cArchiveEntry,"gname",1,1);
+	rb_define_attr(rb_cArchiveEntry,"uname",1,1);
+	rb_define_attr(rb_cArchiveEntry,"gid",1,1);
+	rb_define_attr(rb_cArchiveEntry,"uid",1,1);
+
+
+	rb_define_attr(rb_cArchiveEntry,"atime",1,1);
+	rb_define_attr(rb_cArchiveEntry,"ctime",1,1);
+	rb_define_attr(rb_cArchiveEntry,"mtime",1,1);
+	rb_define_attr(rb_cArchiveEntry,"birthtime",1,1);
+#endif
 	rb_cArchiveEntry = rb_define_class_under(rb_cArchive,"Entry",rb_cObject);
 	rb_define_alloc_func(rb_cArchiveEntry,ArchiveEntry_alloc);
 	rb_define_private_method(rb_cArchiveEntry,"initialize_copy",RUBY_METHOD_FUNC(ArchiveEntry_initialize_copy),1);

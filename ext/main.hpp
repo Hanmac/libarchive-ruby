@@ -92,6 +92,10 @@ inline archive_entry* wrap< archive_entry* >(const VALUE &vfile)
   Data_Get_Struct( vfile, rarchive_entry, file);
 	return file->entry;
 }
-
+template <>
+inline VALUE wrap< char* >(char *str )
+{
+	return str == NULL? Qnil : rb_str_new2(str);
+}
 #endif /* __RubyAchiveMain_H__ */
 

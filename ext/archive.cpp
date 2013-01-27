@@ -40,6 +40,8 @@ typedef std::vector<struct archive_entry *> EntryVector;
 typedef std::vector<std::string> BuffVector;
 typedef std::vector<int> IntVector;
 
+typedef std::vector<std::pair<struct archive_entry *,std::string> > DataVector;
+
 typedef std::map<ID,int> SymToIntType;
 SymToIntType SymToFormat;
 SymToIntType SymToFilter;
@@ -209,8 +211,115 @@ int write_set_filters(struct archive *data,const IntVector &filter)
 	return error;
 }
 
+void read_data_from_fd(struct archive *file,VALUE name,int fd,DataVector &data)
+{
+	char buff[8192];
+	size_t bytes_read;
+	std::string strbuff;
+	
+	struct archive_entry *entry = archive_entry_new();
+	
+	archive_read_disk_entry_from_file(file, entry, fd, NULL);
+	archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
+	
+	
+	while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
+		strbuff.append(buff, bytes_read);
+	
+	data.push_back(std::make_pair(entry,strbuff));
 }
 
+void read_data_from_ruby(struct archive *file,VALUE name,VALUE obj,DataVector &data)
+{
+	std::string strbuff;
+	
+	struct archive_entry *entry = archive_entry_new();
+	
+	archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
+	
+	//TODO should i read in chunks?
+	VALUE result = rb_funcall(obj,rb_intern("read"),0);
+	strbuff.append(rb_string_value_cstr(&result), RSTRING_LEN(result));
+	
+	data.push_back(std::make_pair(entry,strbuff));
+}
+
+struct read_data_path_obj
+{
+	struct archive* archive;
+	struct archive* match;
+	DataVector *data;
+};
+
+
+VALUE read_data_from_path_block(struct read_data_path_obj *obj)
+{
+	struct archive_entry *entry = archive_entry_new();
+	
+	while(archive_read_next_header2(obj->archive,entry) == ARCHIVE_OK)
+	{
+		// add the "." base dir
+		if(strcmp(archive_entry_pathname(entry),".") == 0)
+			archive_read_disk_descend(obj->archive);
+		
+		// fist look at the match object, then use the block if given
+		//TODO: react to the change of the entry object
+		if(!archive_match_excluded(obj->match,entry) &&
+			((!rb_block_given_p()) || RTEST(rb_yield(wrap(entry)))))
+		{
+			std::string strbuff;
+			const void *p;
+			size_t size;
+			int64_t offset;
+
+			while(archive_read_data_block(obj->archive, &p, &size, &offset) == ARCHIVE_OK)
+				strbuff.append((const char*)p,size);
+
+			obj->data->push_back(std::make_pair(archive_entry_clone(entry),strbuff));
+			archive_read_disk_descend(obj->archive);
+		}
+	}
+	return Qnil;
+}
+
+VALUE Archive_read_block_close(struct archive * data)
+{
+	archive_read_close(data);
+	return Qnil;
+}
+
+void read_data_from_path(struct archive * file,struct archive * match,const char* path,DataVector &data)
+{
+
+	archive_read_disk_open(file,path);
+	
+	read_data_path_obj obj;
+	obj.archive = file;
+	obj.match = match;
+	obj.data = &data;
+
+	struct archive_entry *entry = archive_entry_new();
+	
+	archive_read_next_header2(file,entry);
+	archive_read_disk_descend(file);
+
+	RB_ENSURE(read_data_from_path_block,&obj,Archive_read_block_close,file);
+}
+
+
+void read_data_from_path2(VALUE path,DataVector &data)
+{
+	struct archive * file = archive_read_disk_new();
+	struct archive * match = archive_match_new();
+	const char * str = ".";
+	if(!RTEST(rb_funcall(rb_cFile,rb_intern("exist?"),1,path))){
+		archive_match_include_pattern(match,rb_string_value_cstr(&path));
+	}else
+		str = rb_string_value_cstr(&path);
+	read_data_from_path(file,match,str,data);
+}
+
+}
 
 void Archive_format_from_path(VALUE self,int &format,IntVector &filters)
 {
@@ -336,8 +445,8 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 	//to set the format the file must convert
 	if(!NIL_P(r_format)){
 	
-		struct archive *a = archive_read_new(),*b=archive_write_new();
-		struct archive_entry *entry;
+		//struct archive *a = archive_read_new(),*b=archive_write_new();
+		//struct archive_entry *entry;
 		int format,filter;
 		EntryVector entries;
 		BuffVector allbuff;
@@ -426,7 +535,11 @@ VALUE Archive_each_block(struct archive *data)
 	return Qnil;
 }
 
-/*
+/*//		while(archive_read_data_block(a, &p, &size, &offset) == ARCHIVE_OK)
+//		{
+//			std::cout << offset << std::endl;
+//			archive_write_data(b,p,size);
+//		}
  * call-seq:
  *   each(){|entry [, data]| ... } → self
  *   each()                        → an_enumerator
@@ -899,6 +1012,28 @@ VALUE Archive_format_name(VALUE self)
 	}
 	return name ? rb_str_new2(name) : Qnil	;
 }
+
+
+struct archive* create_match_object(VALUE opts)
+{
+	VALUE temp;
+	struct archive* result = archive_match_new();
+	if(rb_obj_is_kind_of(opts,rb_cHash))
+	{
+	if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("uid")))))
+		archive_match_include_uid(result,NUM2INT(temp));
+	if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("gid")))))
+		archive_match_include_gid(result,NUM2INT(temp));
+
+	}
+	return result;
+}
+
+
+
+
+
+
 
 
 //key is the entry and val is
@@ -1538,13 +1673,21 @@ extern "C" void Init_archive(void){
 	
 	Init_archive_entry(rb_cArchive);
 	
-	rb_define_const(rb_cArchive,"EXTRACT_TIME",INT2NUM(ARCHIVE_EXTRACT_TIME));
 	rb_define_const(rb_cArchive,"EXTRACT_OWNER",INT2NUM(ARCHIVE_EXTRACT_OWNER));
 	rb_define_const(rb_cArchive,"EXTRACT_PERM",INT2NUM(ARCHIVE_EXTRACT_PERM));
+	rb_define_const(rb_cArchive,"EXTRACT_TIME",INT2NUM(ARCHIVE_EXTRACT_TIME));
 	rb_define_const(rb_cArchive,"EXTRACT_NO_OVERWRITE",INT2NUM(ARCHIVE_EXTRACT_NO_OVERWRITE));
+	rb_define_const(rb_cArchive,"EXTRACT_UNLINK",INT2NUM(ARCHIVE_EXTRACT_UNLINK));
 	rb_define_const(rb_cArchive,"EXTRACT_ACL",INT2NUM(ARCHIVE_EXTRACT_ACL));
 	rb_define_const(rb_cArchive,"EXTRACT_FFLAGS",INT2NUM(ARCHIVE_EXTRACT_FFLAGS));
 	rb_define_const(rb_cArchive,"EXTRACT_XATTR",INT2NUM(ARCHIVE_EXTRACT_XATTR));
+	rb_define_const(rb_cArchive,"EXTRACT_SECURE_SYMLINKS",INT2NUM(ARCHIVE_EXTRACT_SECURE_SYMLINKS));
+	rb_define_const(rb_cArchive,"EXTRACT_SECURE_NODOTDOT",INT2NUM(ARCHIVE_EXTRACT_SECURE_NODOTDOT));
+	rb_define_const(rb_cArchive,"EXTRACT_NO_AUTODIR",INT2NUM(ARCHIVE_EXTRACT_NO_AUTODIR));
+	rb_define_const(rb_cArchive,"EXTRACT_NO_OVERWRITE_NEWER",INT2NUM(ARCHIVE_EXTRACT_NO_OVERWRITE_NEWER));
+	rb_define_const(rb_cArchive,"EXTRACT_SPARSE",INT2NUM(ARCHIVE_EXTRACT_SPARSE));
+	rb_define_const(rb_cArchive,"EXTRACT_MAC_METADATA",INT2NUM(ARCHIVE_EXTRACT_MAC_METADATA));
+	
 	
 	rb_eArchiveError = rb_define_class_under(rb_cArchive,"Error",rb_eStandardError);
 	rb_eArchiveErrorFormat = rb_define_class_under(rb_eArchiveError,"Format",rb_eArchiveError);
@@ -1583,4 +1726,14 @@ extern "C" void Init_archive(void){
 	pair = std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_NONE);
 	fileExt[".tar"]=pair;
 	
+	
+	DataVector data;
+	RubyArchive::read_data_from_path2(rb_str_new2("*.cpp"),data);
+	rb_warn("%lu",data.size());
+//	
+	for(size_t i = 0; i < data.size(); ++i)
+	{
+		rb_warn("%s",archive_entry_pathname(data[i].first));
+		rb_warn("%lu",data[i].second.size());
+	}
 }
