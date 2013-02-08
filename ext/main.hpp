@@ -37,8 +37,6 @@ void Init_archive_entry(VALUE m);
 template <typename T>
 VALUE wrap(T *arg){ return Qnil;};
 template <typename T>
-VALUE wrap(T arg){ return Qnil;};
-template <typename T>
 T wrap(const VALUE &arg){};
 
 enum archive_type {archive_path,archive_fd,archive_buffer,archive_ruby};
@@ -93,9 +91,14 @@ inline archive_entry* wrap< archive_entry* >(const VALUE &vfile)
 	return file->entry;
 }
 template <>
-inline VALUE wrap< char* >(char *str )
+inline VALUE wrap< const char >(const char *str )
 {
 	return str == NULL? Qnil : rb_str_new2(str);
+}
+template <>
+const char* wrap< const char* >(const VALUE &vfile)
+{
+	return NIL_P(vfile) ? NULL : StringValueCStr((volatile VALUE&)vfile);
 }
 #endif /* __RubyAchiveMain_H__ */
 

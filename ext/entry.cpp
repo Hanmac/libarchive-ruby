@@ -26,189 +26,174 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 
 VALUE rb_cArchiveEntry;
 
-VALUE ArchiveEntry_alloc(VALUE self)
+
+
+void rb_define_attr_method(VALUE klass,const std::string &name, VALUE get(VALUE),VALUE set(VALUE,VALUE))
+{
+	rb_define_method(klass,name.c_str(),RUBY_METHOD_FUNC(get),0);
+	rb_define_method(klass,(name + "=").c_str(),RUBY_METHOD_FUNC(set),1);
+}
+
+
+#define macro_attr(attr,get,set) \
+VALUE _get_##attr(VALUE self) { return get(archive_entry_##attr(_self)); } \
+VALUE _set_##attr(VALUE self,VALUE val) { archive_entry_set_##attr(_self,set(val));return val; }
+
+#define is_type(type,flag) \
+VALUE _is_##type(VALUE self) { return archive_entry_filetype(_self) == flag ? Qtrue : Qfalse; }
+
+
+
+namespace ArchiveEntry {
+
+VALUE _alloc(VALUE self)
 {
 	return wrap(archive_entry_new());
 }
 
+VALUE _initialize_copy(VALUE self,VALUE source)
+{
+	rarchive_entry  *file;
+  Data_Get_Struct( self, rarchive_entry, file);
+  file->entry = archive_entry_clone(wrap<archive_entry*>(source));
+	return self;
+}
+
+
+macro_attr(dev,INT2NUM,NUM2INT)
+macro_attr(devminor,INT2NUM,NUM2INT)
+macro_attr(devmajor,INT2NUM,NUM2INT)
+
+macro_attr(rdev,INT2NUM,NUM2INT)
+macro_attr(rdevminor,INT2NUM,NUM2INT)
+macro_attr(rdevmajor,INT2NUM,NUM2INT)
+
+macro_attr(uid,INT2NUM,NUM2INT)
+macro_attr(gid,INT2NUM,NUM2INT)
+
+macro_attr(uname,wrap,wrap<const char*>)
+macro_attr(gname,wrap,wrap<const char*>)
+
+macro_attr(pathname,wrap,wrap<const char*>)
+macro_attr(symlink,wrap,wrap<const char*>)
+macro_attr(hardlink,wrap,wrap<const char*>)
+//macro_attr(sourcepath,wrap,wrap<const char*>)
+
+is_type(file,AE_IFREG)
+is_type(symlink,AE_IFLNK)
+is_type(directory,AE_IFDIR)
+is_type(chardev,AE_IFCHR)
+is_type(blockdev,AE_IFBLK)
+is_type(pipe,AE_IFIFO)
+is_type(socket,AE_IFSOCK)
+
+
+
+
+VALUE _get_atime(VALUE self)
+{
+	if(archive_entry_atime_is_set(_self))
+		return rb_time_new(archive_entry_atime(_self),archive_entry_atime_nsec(_self));
+	else
+		return Qnil;
+}
+
+VALUE _get_ctime(VALUE self)
+{
+	if(archive_entry_ctime_is_set(_self))
+		return rb_time_new(archive_entry_ctime(_self),archive_entry_ctime_nsec(_self));
+	else
+		return Qnil;
+}
+
+VALUE _get_mtime(VALUE self)
+{
+	if(archive_entry_mtime_is_set(_self))
+		return rb_time_new(archive_entry_mtime(_self),archive_entry_mtime_nsec(_self));
+	else
+		return Qnil;
+}
+
+VALUE _get_birthtime(VALUE self)
+{
+	if(archive_entry_birthtime_is_set(_self))
+		return rb_time_new(archive_entry_birthtime(_self),archive_entry_birthtime_nsec(_self));
+	else
+		return Qnil;
+}
+
+VALUE _set_atime(VALUE self,VALUE value)
+{
+	if(NIL_P(value))
+		archive_entry_unset_atime(_self);
+	else
+		archive_entry_set_atime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
+	return value;
+}
+
+VALUE _set_ctime(VALUE self,VALUE value)
+{
+	if(NIL_P(value))
+		archive_entry_unset_ctime(_self);
+	else
+		archive_entry_set_ctime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
+	return value;
+}
+
+VALUE _set_mtime(VALUE self,VALUE value)
+{
+	if(NIL_P(value))
+		archive_entry_unset_mtime(_self);
+	else
+		archive_entry_set_mtime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
+	return value;
+}
+
+VALUE _set_birthtime(VALUE self,VALUE value)
+{
+	if(NIL_P(value))
+		archive_entry_unset_birthtime(_self);
+	else
+		archive_entry_set_birthtime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
+	return value;
+}
+
 
 /*
  * call-seq:
- * entry.dev -> Integer
+ * entry <=> other -> -1,0,1 or nil
  *
- * returns dev
+ * compares two entries
  */
-VALUE ArchiveEntry_dev(VALUE self)
+VALUE _compare(VALUE self,VALUE other)
 {
-	return INT2NUM(archive_entry_dev(_self));
+	if(rb_obj_is_kind_of(other,rb_cArchiveEntry) != Qtrue)
+		return Qnil;
+	else {
+		return rb_funcall(_get_mtime(self),rb_intern("<=>"),1,_get_mtime(other));
+	}
 }
-/*
- * call-seq:
- * entry.devmajor -> Integer
- *
- * returns devmajor
- */
-VALUE ArchiveEntry_devmajor(VALUE self)
-{
-	return INT2NUM(archive_entry_devmajor(_self));
-}
-/*
- * call-seq:
- * entry.devminor -> Integer
- *
- * returns devminor
- */
-VALUE ArchiveEntry_devminor(VALUE self)
-{
-	return INT2NUM(archive_entry_devminor(_self));
-}
+
 
 /*
  * call-seq:
- * entry.rdev -> Integer
+ * entry.inspect -> String
  *
- * returns rdev
+ * returns readable string.
  */
-VALUE ArchiveEntry_rdev(VALUE self)
-{
-	return INT2NUM(archive_entry_rdev(_self));
+VALUE _inspect(VALUE self){
+		VALUE array[3];
+		array[0]=rb_str_new2("#<%s:%s>");
+		array[1]=rb_class_of(self);
+		array[2]=_get_pathname(self);
+		return rb_f_sprintf(3,array);
 }
-/*
- * call-seq:
- * entry.rdevmajor -> Integer
- *
- * returns rdevmajor
- */
-VALUE ArchiveEntry_rdevmajor(VALUE self)
-{
-	return INT2NUM(archive_entry_rdevmajor(_self));
-}
-/*
- * call-seq:
- * entry.rdevminor -> Integer
- *
- * returns rdevminor
- */
-VALUE ArchiveEntry_rdevminor(VALUE self)
-{
-	return INT2NUM(archive_entry_rdevminor(_self));
+
 }
 
 //__LA_DECL __LA_MODE_T	 archive_entry_filetype(struct archive_entry *);
 
 
-
-
-/*
- * call-seq:
- * entry.gname -> String
- *
- * Get Group Name
- */
-VALUE ArchiveEntry_gname(VALUE self)
-{
-	return rb_str_new2(archive_entry_gname(_self));
-}
-
-/*
- * call-seq:
- * entry.uname -> String
- *
- * Get User Name
- */
-VALUE ArchiveEntry_uname(VALUE self)
-{
-	return rb_str_new2(archive_entry_uname(_self));
-}
-/*
- * call-seq:
- * entry.gid -> Integer
- *
- * Get Group ID
- */
-
-VALUE ArchiveEntry_gid(VALUE self)
-{
-	return INT2NUM(archive_entry_gid(_self));
-}
-
-/*
- * call-seq:
- * entry.uid -> Integer
- *
- * Get User ID
- */
-VALUE ArchiveEntry_uid(VALUE self)
-{
-	return INT2NUM(archive_entry_uid(_self));
-}
-/*
- * call-seq:
- * entry.gid = Integer
- *
- * Set Group ID
- */
-VALUE ArchiveEntry_set_gid(VALUE self,VALUE id){
-	archive_entry_set_gid(_self,NUM2INT(id));
-	return id;
-}
-/* 
- * call-seq:
- * entry.uid = Integer
- *
- * Set User ID
- */
-
-VALUE ArchiveEntry_set_uid(VALUE self,VALUE id){
-	archive_entry_set_uid(_self,NUM2INT(id));
-	return id;
-}
-
-/*
- * call-seq:
- * entry.gname = String
- *
- * Set Group Name
- */
-
-VALUE ArchiveEntry_set_gname(VALUE self,VALUE val)
-{
-	archive_entry_set_gname(_self,rb_string_value_cstr(&val));
-	return val;
-}
-/*
- * call-seq:
- * entry.uname = String
- *
- * Set User Name
- */
-VALUE ArchiveEntry_set_uname(VALUE self,VALUE val)
-{
-	archive_entry_set_uname(_self,rb_string_value_cstr(&val));
-	return val;
-}
-
-/*
- * call-seq:
- * entry.path -> String or nil
- *
- * returns the path of the file
- */
-VALUE ArchiveEntry_path(VALUE self)
-{
-	return wrap(archive_entry_pathname(_self));
-}
-
-/*
- * call-seq:
- * entry.hardlink -> String or nil
- *
- * returns the hardlink
- */
-VALUE ArchiveEntry_hardlink(VALUE self)
-{
-	return wrap(archive_entry_hardlink(_self));
-}
 
 /*
  * call-seq:
@@ -231,239 +216,6 @@ VALUE ArchiveEntry_strmode(VALUE self)
 {
 	return wrap(archive_entry_strmode(_self));
 }
-/*
- * call-seq:
- * entry.symlink -> String or nil
- *
- * returns the symlink
- */
-VALUE ArchiveEntry_symlink(VALUE self)
-{
-	return wrap(archive_entry_symlink(_self));
-}
-/*
- * call-seq:
- * entry.path = String
- *
- * sets path
- */
-VALUE ArchiveEntry_set_path(VALUE self,VALUE val)
-{
-	archive_entry_set_pathname(_self,rb_string_value_cstr(&val));
-	return val;
-}
-/*
- * call-seq:
- * entry.hardlink = String
- *
- * sets hardlink
- */
-VALUE ArchiveEntry_set_hardlink(VALUE self,VALUE val)
-{
-	archive_entry_set_hardlink(_self,rb_string_value_cstr(&val));
-	return val;
-}
-/*
- * call-seq:
- * entry.symlink = String
- *
- * sets symlink
- */
-VALUE ArchiveEntry_set_symlink(VALUE self,VALUE val)
-{
-	archive_entry_set_symlink(_self,rb_string_value_cstr(&val));
-	return val;
-}
-
-/* :nodoc:
- */
-VALUE ArchiveEntry_atime(VALUE self)
-{
-	if(archive_entry_atime_is_set(_self))
-		return rb_time_new(archive_entry_atime(_self),archive_entry_atime_nsec(_self));
-	else
-		return Qnil;
-}
-/*:nodoc:
- * call-seq:
- * entry.ctime -> Time or nil
- *
- * returns create time
- */
-VALUE ArchiveEntry_ctime(VALUE self)
-{
-	if(archive_entry_ctime_is_set(_self))
-		return rb_time_new(archive_entry_ctime(_self),archive_entry_ctime_nsec(_self));
-	else
-		return Qnil;
-}
-/*:nodoc:
- * call-seq:
- * entry.mtime -> Time or nil
- *
- * returns modification time
- */
-VALUE ArchiveEntry_mtime(VALUE self)
-{
-	if(archive_entry_mtime_is_set(_self))
-		return rb_time_new(archive_entry_mtime(_self),archive_entry_mtime_nsec(_self));
-	else
-		return Qnil;
-}
-/*:nodoc:
- * call-seq:
- * entry.birthtime -> Time or nil
- *
- * returns birthtime
- */
-VALUE ArchiveEntry_birthtime(VALUE self)
-{
-	if(archive_entry_birthtime_is_set(_self))
-		return rb_time_new(archive_entry_birthtime(_self),archive_entry_birthtime_nsec(_self));
-	else
-		return Qnil;
-}
-/* :nodoc:
- */
-VALUE ArchiveEntry_set_atime(VALUE self,VALUE value)
-{
-	if(value ==Qnil)
-		archive_entry_unset_atime(_self);
-	else
-		archive_entry_set_atime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
-	return value;
-}
-/*:nodoc:
- * call-seq:
- * entry.ctime = Time or nil
- *
- * sets create time
- */
-VALUE ArchiveEntry_set_ctime(VALUE self,VALUE value)
-{
-	if(value ==Qnil)
-		archive_entry_unset_ctime(_self);
-	else
-		archive_entry_set_ctime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
-	return value;
-}
-/*:nodoc:
- * call-seq:
- * entry.mtime = Time or nil
- *
- * sets modification time
- */
-VALUE ArchiveEntry_set_mtime(VALUE self,VALUE value)
-{
-	if(value ==Qnil)
-		archive_entry_unset_mtime(_self);
-	else
-		archive_entry_set_mtime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
-	return value;
-}
-/*:nodoc:
- * call-seq:
- * entry.birthtime = Time or nil
- *
- * sets birthtime
- */
-VALUE ArchiveEntry_set_birthtime(VALUE self,VALUE value)
-{
-	if(value ==Qnil)
-		archive_entry_unset_birthtime(_self);
-	else
-		archive_entry_set_birthtime(_self,NUM2INT(rb_funcall(value,rb_intern("to_i"),0)),NUM2INT(rb_funcall(value,rb_intern("usec"),0)));
-	return value;
-}
-/*
- * call-seq:
- * entry.dev = Integer
- *
- * sets dev
- */
-VALUE ArchiveEntry_set_dev(VALUE self,VALUE dev){
-	archive_entry_set_dev(_self,NUM2INT(dev));
-	return dev;
-}
-/*
- * call-seq:
- * entry.devmajor = Integer
- *
- * sets devmajor
- */
-VALUE ArchiveEntry_set_devmajor(VALUE self,VALUE dev){
-	archive_entry_set_devmajor(_self,NUM2INT(dev));
-	return dev;
-}
-/*
- * call-seq:
- * entry.devminor = Integer
- *
- * sets devminor
- */
-VALUE ArchiveEntry_set_devminor(VALUE self,VALUE dev){
-	archive_entry_set_devminor(_self,NUM2INT(dev));
-	return dev;
-}
-/*
- * call-seq:
- * entry.rdev = Integer
- *
- * sets rdev
- */
-VALUE ArchiveEntry_set_rdev(VALUE self,VALUE dev){
-	archive_entry_set_dev(_self,NUM2INT(dev));
-	return dev;
-}
-/*
- * call-seq:
- * entry.rdevminor = Integer
- *
- * sets rdevminor
- */
-VALUE ArchiveEntry_set_rdevmajor(VALUE self,VALUE dev){
-	archive_entry_set_rdevmajor(_self,NUM2INT(dev));
-	return dev;
-}
-/*
- * call-seq:
- * entry.rdevmajor = Integer
- *
- * sets rdevmajor
- */
-VALUE ArchiveEntry_set_rdevminor(VALUE self,VALUE dev){
-	archive_entry_set_rdevminor(_self,NUM2INT(dev));
-	return dev;
-}
-/*
- * call-seq:
- * entry <=> other -> -1,0,1 or nil
- *
- * compares two entries
- */
-VALUE ArchiveEntry_compare(VALUE self,VALUE other)
-{
-	if(rb_obj_is_kind_of(other,rb_cArchiveEntry) != Qtrue)
-		return Qnil;
-	else {
-		return rb_funcall(ArchiveEntry_mtime(self),rb_intern("<=>"),1,ArchiveEntry_mtime(other));
-	}
-}
-
-/*
- * call-seq:
- * entry.inspect -> String
- *
- * returns readable string.
- */
-VALUE ArchiveEntry_inspect(VALUE self){
-		VALUE array[3];
-		array[0]=rb_str_new2("#<%s:%s>");
-		array[1]=rb_class_of(self);	
-		array[2]=ArchiveEntry_path(self);
-		return rb_f_sprintf(3,array);
-}
-
 
 //ACL added later with acl gem
 
@@ -520,14 +272,6 @@ VALUE ArchiveEntry_acl_add(VALUE self){
 }
 
 
-VALUE ArchiveEntry_initialize_copy(VALUE self,VALUE source)
-{
-	rarchive_entry  *file;
-  Data_Get_Struct( self, rarchive_entry, file);
-  file->entry = archive_entry_clone(wrap<archive_entry*>(source));
-	return self;
-}
-
 
 /* Document-attr: atime
  *
@@ -549,67 +293,72 @@ void Init_archive_entry(VALUE rb_cArchive){
 #if 0
 	rb_cArchive = rb_define_class("Archive",rb_cObject);
 
-	rb_define_attr(rb_cArchiveEntry,"gname",1,1);
+	rb_define_attr(rb_cArchiveEntry,"path",1,1);
+	rb_define_attr(rb_cArchiveEntry,"symlink",1,1);
+	rb_define_attr(rb_cArchiveEntry,"hardlink",1,1);
+
+	rb_define_attr(rb_cArchiveEntry,"uid",1,1);
 	rb_define_attr(rb_cArchiveEntry,"uname",1,1);
 	rb_define_attr(rb_cArchiveEntry,"gid",1,1);
-	rb_define_attr(rb_cArchiveEntry,"uid",1,1);
-
+	rb_define_attr(rb_cArchiveEntry,"gname",1,1);
 
 	rb_define_attr(rb_cArchiveEntry,"atime",1,1);
 	rb_define_attr(rb_cArchiveEntry,"ctime",1,1);
 	rb_define_attr(rb_cArchiveEntry,"mtime",1,1);
 	rb_define_attr(rb_cArchiveEntry,"birthtime",1,1);
-#endif
-	rb_cArchiveEntry = rb_define_class_under(rb_cArchive,"Entry",rb_cObject);
-	rb_define_alloc_func(rb_cArchiveEntry,ArchiveEntry_alloc);
-	rb_define_private_method(rb_cArchiveEntry,"initialize_copy",RUBY_METHOD_FUNC(ArchiveEntry_initialize_copy),1);
-	rb_define_method(rb_cArchiveEntry,"inspect",RUBY_METHOD_FUNC(ArchiveEntry_inspect),0);
 	
-	rb_define_method(rb_cArchiveEntry,"gname",RUBY_METHOD_FUNC(ArchiveEntry_gname),0);
-	rb_define_method(rb_cArchiveEntry,"uname",RUBY_METHOD_FUNC(ArchiveEntry_uname),0);
-	rb_define_method(rb_cArchiveEntry,"gid",RUBY_METHOD_FUNC(ArchiveEntry_gid),0);
-	rb_define_method(rb_cArchiveEntry,"uid",RUBY_METHOD_FUNC(ArchiveEntry_uid),0);
+	rb_define_attr(rb_cArchiveEntry,"dev",1,1);
+	rb_define_attr(rb_cArchiveEntry,"devmajor",1,1);
+	rb_define_attr(rb_cArchiveEntry,"devminor",1,1);
 
-	rb_define_method(rb_cArchiveEntry,"gname=",RUBY_METHOD_FUNC(ArchiveEntry_set_gname),1);
-	rb_define_method(rb_cArchiveEntry,"uname=",RUBY_METHOD_FUNC(ArchiveEntry_set_uname),1);
-	rb_define_method(rb_cArchiveEntry,"gid=",RUBY_METHOD_FUNC(ArchiveEntry_set_gid),1);
-	rb_define_method(rb_cArchiveEntry,"uid=",RUBY_METHOD_FUNC(ArchiveEntry_set_uid),1);
+	rb_define_attr(rb_cArchiveEntry,"rdev",1,1);
+	rb_define_attr(rb_cArchiveEntry,"rdevmajor",1,1);
+	rb_define_attr(rb_cArchiveEntry,"rdevminor",1,1);
+	
+	
+#endif
 
-	rb_define_method(rb_cArchiveEntry,"path",RUBY_METHOD_FUNC(ArchiveEntry_path),0);
-	rb_define_method(rb_cArchiveEntry,"symlink",RUBY_METHOD_FUNC(ArchiveEntry_symlink),0);
-	rb_define_method(rb_cArchiveEntry,"hardlink",RUBY_METHOD_FUNC(ArchiveEntry_hardlink),0);
+	using namespace ArchiveEntry;
+	rb_cArchiveEntry = rb_define_class_under(rb_cArchive,"Entry",rb_cObject);
+	rb_define_alloc_func(rb_cArchiveEntry,_alloc);
+	rb_define_private_method(rb_cArchiveEntry,"initialize_copy",RUBY_METHOD_FUNC(_initialize_copy),1);
+	rb_define_method(rb_cArchiveEntry,"inspect",RUBY_METHOD_FUNC(_inspect),0);
+	
+	rb_define_attr_method(rb_cArchiveEntry,"path",_get_pathname,_set_pathname);
+	rb_define_attr_method(rb_cArchiveEntry,"symlink",_get_symlink,_set_symlink);
+	rb_define_attr_method(rb_cArchiveEntry,"hardlink",_get_hardlink,_set_hardlink);
+	
 	rb_define_method(rb_cArchiveEntry,"sourcepath",RUBY_METHOD_FUNC(ArchiveEntry_sourcepath),0);
 
-	rb_define_method(rb_cArchiveEntry,"path=",RUBY_METHOD_FUNC(ArchiveEntry_set_path),1);
-	rb_define_method(rb_cArchiveEntry,"symlink=",RUBY_METHOD_FUNC(ArchiveEntry_set_symlink),1);
-	rb_define_method(rb_cArchiveEntry,"hardlink=",RUBY_METHOD_FUNC(ArchiveEntry_set_hardlink),1);
+	rb_define_attr_method(rb_cArchiveEntry,"uid",_get_uid,_set_uid);
+	rb_define_attr_method(rb_cArchiveEntry,"gid",_get_gid,_set_gid);
+	rb_define_attr_method(rb_cArchiveEntry,"uname",_get_uname,_set_uname);
+	rb_define_attr_method(rb_cArchiveEntry,"gname",_get_gname,_set_gname);
 
-	rb_define_method(rb_cArchiveEntry,"atime",RUBY_METHOD_FUNC(ArchiveEntry_atime),0);//:nodoc:
-	rb_define_method(rb_cArchiveEntry,"ctime",RUBY_METHOD_FUNC(ArchiveEntry_ctime),0);
-	rb_define_method(rb_cArchiveEntry,"mtime",RUBY_METHOD_FUNC(ArchiveEntry_mtime),0);
-	rb_define_method(rb_cArchiveEntry,"birthtime",RUBY_METHOD_FUNC(ArchiveEntry_birthtime),0);
-
-	rb_define_method(rb_cArchiveEntry,"atime=",RUBY_METHOD_FUNC(ArchiveEntry_set_atime),1);//:nodoc:
-	rb_define_method(rb_cArchiveEntry,"ctime=",RUBY_METHOD_FUNC(ArchiveEntry_set_ctime),1);
-	rb_define_method(rb_cArchiveEntry,"mtime=",RUBY_METHOD_FUNC(ArchiveEntry_set_mtime),1);
-	rb_define_method(rb_cArchiveEntry,"birthtime=",RUBY_METHOD_FUNC(ArchiveEntry_set_birthtime),1);
+	rb_define_attr_method(rb_cArchiveEntry,"atime",_get_atime,_set_atime);
+	rb_define_attr_method(rb_cArchiveEntry,"ctime",_get_ctime,_set_ctime);
+	rb_define_attr_method(rb_cArchiveEntry,"mtime",_get_mtime,_set_mtime);
+	rb_define_attr_method(rb_cArchiveEntry,"birthtime",_get_birthtime,_set_birthtime);
 	
-	rb_define_method(rb_cArchiveEntry,"dev",RUBY_METHOD_FUNC(ArchiveEntry_dev),0);
-	rb_define_method(rb_cArchiveEntry,"dev_major",RUBY_METHOD_FUNC(ArchiveEntry_devmajor),0);
-	rb_define_method(rb_cArchiveEntry,"dev_minor",RUBY_METHOD_FUNC(ArchiveEntry_devminor),0);
-	rb_define_method(rb_cArchiveEntry,"rdev",RUBY_METHOD_FUNC(ArchiveEntry_rdev),0);
-	rb_define_method(rb_cArchiveEntry,"rdev_major",RUBY_METHOD_FUNC(ArchiveEntry_rdevmajor),0);
-	rb_define_method(rb_cArchiveEntry,"rdev_minor",RUBY_METHOD_FUNC(ArchiveEntry_rdevminor),0);
-
-	rb_define_method(rb_cArchiveEntry,"dev=",RUBY_METHOD_FUNC(ArchiveEntry_set_dev),1);
-	rb_define_method(rb_cArchiveEntry,"dev_major=",RUBY_METHOD_FUNC(ArchiveEntry_set_devmajor),1);
-	rb_define_method(rb_cArchiveEntry,"dev_minor=",RUBY_METHOD_FUNC(ArchiveEntry_set_devminor),1);
-	rb_define_method(rb_cArchiveEntry,"rdev=",RUBY_METHOD_FUNC(ArchiveEntry_set_rdev),1);
-	rb_define_method(rb_cArchiveEntry,"rdev_major=",RUBY_METHOD_FUNC(ArchiveEntry_set_rdevmajor),1);
-	rb_define_method(rb_cArchiveEntry,"rdev_minor=",RUBY_METHOD_FUNC(ArchiveEntry_set_rdevminor),1);
+	rb_define_attr_method(rb_cArchiveEntry,"dev",_get_dev,_set_dev);
+	rb_define_attr_method(rb_cArchiveEntry,"dev_major",_get_devmajor,_set_devmajor);
+	rb_define_attr_method(rb_cArchiveEntry,"dev_minor",_get_devminor,_set_devminor);
+	
+	rb_define_attr_method(rb_cArchiveEntry,"rdev",_get_rdev,_set_rdev);
+	rb_define_attr_method(rb_cArchiveEntry,"rdev_major",_get_rdevmajor,_set_rdevmajor);
+	rb_define_attr_method(rb_cArchiveEntry,"rdev_minor",_get_rdevminor,_set_rdevminor);
+	
+	rb_define_method(rb_cArchiveEntry,"file?",RUBY_METHOD_FUNC(_is_file),0);
+	rb_define_method(rb_cArchiveEntry,"directory?",RUBY_METHOD_FUNC(_is_directory),0);
+	rb_define_method(rb_cArchiveEntry,"chardev?",RUBY_METHOD_FUNC(_is_chardev),0);
+	rb_define_method(rb_cArchiveEntry,"blockdev?",RUBY_METHOD_FUNC(_is_blockdev),0);
+	rb_define_method(rb_cArchiveEntry,"symlink?",RUBY_METHOD_FUNC(_is_symlink),0);
+	rb_define_method(rb_cArchiveEntry,"pipe?",RUBY_METHOD_FUNC(_is_pipe),0);
+	rb_define_method(rb_cArchiveEntry,"socket?",RUBY_METHOD_FUNC(_is_socket),0);
+	
 	
 	rb_include_module(rb_cArchiveEntry,rb_mComparable);
-	rb_define_method(rb_cArchiveEntry,"<=>",RUBY_METHOD_FUNC(ArchiveEntry_compare),1);
+	rb_define_method(rb_cArchiveEntry,"<=>",RUBY_METHOD_FUNC(_compare),1);
 	
 	rb_define_alias(rb_cArchiveEntry,"to_s","path");
 //*	

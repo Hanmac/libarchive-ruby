@@ -73,18 +73,14 @@ struct extract_obj {
 
 struct write_obj {
 	struct archive* archive;
-	EntryVector *entries;
-	BuffVector *allbuff;
+	DataVector *data;
 };
 
 struct add_obj {
 	struct archive* archive;
-	struct archive* file;
-	struct archive_entry* entry;
-	EntryVector *entries;
-	BuffVector *allbuff;
-	int fd;
+	DataVector *data;
 	VALUE obj;
+	VALUE name;
 };
 
 
@@ -165,7 +161,7 @@ void read_data(struct archive *a,std::string &str)
 
 }
 
-void read_old_data(struct archive *a,EntryVector &entries,BuffVector &buffs, int &format, IntVector &filters)
+void read_old_data(struct archive *a,DataVector &entries, int &format, IntVector &filters)
 {
 		struct archive_entry *entry;
 		
@@ -173,12 +169,28 @@ void read_old_data(struct archive *a,EntryVector &entries,BuffVector &buffs, int
 			format = archive_format(a);
 			if(filters.empty())
 				read_get_filters(a,filters);
+			std::string buff;
+			read_data(a,buff);
 			
-			entries.push_back(archive_entry_clone(entry));
-			buffs.push_back(std::string(""));
-			read_data(a,buffs.back());
+			entries.push_back(std::make_pair(archive_entry_clone(entry),buff));
+			
 		}
 		archive_read_finish(a);
+}
+
+struct archive* create_match_object(VALUE opts)
+{
+	VALUE temp;
+	struct archive* result = archive_match_new();
+	if(rb_obj_is_kind_of(opts,rb_cHash))
+	{
+	if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("uid")))))
+		archive_match_include_uid(result,NUM2INT(temp));
+	if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("gid")))))
+		archive_match_include_gid(result,NUM2INT(temp));
+
+	}
+	return result;
 }
 
 
@@ -192,7 +204,7 @@ bool match_entry(struct archive_entry *entry,VALUE name)
 		return rb_reg_match(name,str)!=Qnil;
 	}else
 		name = rb_funcall(name,rb_intern("to_s"),0);
-		std::string str1(rb_string_value_cstr(&name)),str2(str1);
+		std::string str1(StringValueCStr(name)),str2(str1);
 		str2 += '/'; // dir ends of '/'
 		return str1.compare(cstr)==0 || str2.compare(cstr)==0;
 					
@@ -220,7 +232,7 @@ void read_data_from_fd(struct archive *file,VALUE name,int fd,DataVector &data)
 	struct archive_entry *entry = archive_entry_new();
 	
 	archive_read_disk_entry_from_file(file, entry, fd, NULL);
-	archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
+	archive_entry_copy_pathname(entry, StringValueCStr(name));
 	
 	
 	while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
@@ -235,11 +247,11 @@ void read_data_from_ruby(struct archive *file,VALUE name,VALUE obj,DataVector &d
 	
 	struct archive_entry *entry = archive_entry_new();
 	
-	archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
+	archive_entry_copy_pathname(entry, StringValueCStr(name));
 	
 	//TODO should i read in chunks?
 	VALUE result = rb_funcall(obj,rb_intern("read"),0);
-	strbuff.append(rb_string_value_cstr(&result), RSTRING_LEN(result));
+	strbuff.append(StringValueCStr(result), RSTRING_LEN(result));
 	
 	data.push_back(std::make_pair(entry,strbuff));
 }
@@ -249,6 +261,7 @@ struct read_data_path_obj
 	struct archive* archive;
 	struct archive* match;
 	DataVector *data;
+	VALUE path;
 };
 
 
@@ -258,15 +271,28 @@ VALUE read_data_from_path_block(struct read_data_path_obj *obj)
 	
 	while(archive_read_next_header2(obj->archive,entry) == ARCHIVE_OK)
 	{
-		// add the "." base dir
-		if(strcmp(archive_entry_pathname(entry),".") == 0)
-			archive_read_disk_descend(obj->archive);
+		const char *cstr = archive_entry_pathname(entry);
 		
-		// fist look at the match object, then use the block if given
-		//TODO: react to the change of the entry object
-		if(!archive_match_excluded(obj->match,entry) &&
-			((!rb_block_given_p()) || RTEST(rb_yield(wrap(entry)))))
+		//allways add subdirs
+		archive_read_disk_descend(obj->archive);
+		
+		// add the "." base dir
+		if(strcmp(cstr,".") == 0)
+			continue;
+		
+		// fist look at the match object
+		if(archive_match_excluded(obj->match,entry))
+			continue;
+		
+		// then if path is Regexp try to match against it
+		if(rb_obj_is_kind_of(obj->path,rb_cRegexp))
+			if(!RTEST(rb_reg_match(obj->path,rb_str_new2(cstr))))
+				continue;
+		
+		// then use the block if given
+		if((!rb_block_given_p()) || RTEST(rb_yield(wrap(entry))))
 		{
+			//TODO: react to the change of the entry object
 			std::string strbuff;
 			const void *p;
 			size_t size;
@@ -275,9 +301,20 @@ VALUE read_data_from_path_block(struct read_data_path_obj *obj)
 			while(archive_read_data_block(obj->archive, &p, &size, &offset) == ARCHIVE_OK)
 				strbuff.append((const char*)p,size);
 
-			obj->data->push_back(std::make_pair(archive_entry_clone(entry),strbuff));
-			archive_read_disk_descend(obj->archive);
+			struct archive_entry *entry2 = archive_entry_clone(entry);
+			
+			
+			//Drop the ./ from a filename when using pattern
+			std::string path(archive_entry_pathname(entry2));
+			if(path.compare(0,2,"./") == 0) {
+				path.erase(0,2);
+				archive_entry_copy_pathname(entry2,path.c_str());
+			}
+			
+			obj->data->push_back(std::make_pair(entry2,strbuff));
+			
 		}
+		
 	}
 	return Qnil;
 }
@@ -288,35 +325,43 @@ VALUE Archive_read_block_close(struct archive * data)
 	return Qnil;
 }
 
-void read_data_from_path(struct archive * file,struct archive * match,const char* path,DataVector &data)
+void read_data_from_path(struct archive * file,struct archive * match,VALUE rpath,const char* path,DataVector &data)
 {
 
 	archive_read_disk_open(file,path);
 	
 	read_data_path_obj obj;
 	obj.archive = file;
+	obj.path = rpath;
 	obj.match = match;
 	obj.data = &data;
 
-	struct archive_entry *entry = archive_entry_new();
+	//struct archive_entry *entry = archive_entry_new();
 	
-	archive_read_next_header2(file,entry);
-	archive_read_disk_descend(file);
+	//archive_read_next_header2(file,entry);
+	//archive_read_disk_descend(file);
 
 	RB_ENSURE(read_data_from_path_block,&obj,Archive_read_block_close,file);
 }
 
 
-void read_data_from_path2(VALUE path,DataVector &data)
+void read_data_from_path2(VALUE path,VALUE opts,DataVector &data)
 {
 	struct archive * file = archive_read_disk_new();
-	struct archive * match = archive_match_new();
+	struct archive * match = create_match_object(opts);
+	
+	archive_read_disk_set_standard_lookup(file);
 	const char * str = ".";
-	if(!RTEST(rb_funcall(rb_cFile,rb_intern("exist?"),1,path))){
-		archive_match_include_pattern(match,rb_string_value_cstr(&path));
-	}else
-		str = rb_string_value_cstr(&path);
-	read_data_from_path(file,match,str,data);
+	
+	if(!rb_obj_is_kind_of(path,rb_cRegexp))
+	{
+		path = rb_funcall(path,rb_intern("to_s"),0);
+		if(!RTEST(rb_funcall(rb_cFile,rb_intern("exist?"),1,path))){
+			archive_match_include_pattern(match,StringValueCStr(path));
+		}else
+			str = StringValueCStr(path);
+	}
+	read_data_from_path(file,match,path,str,data);
 }
 
 }
@@ -345,7 +390,9 @@ int Archive_read_ruby(VALUE self,struct archive *data)
 
 	archive_read_support_filter_all(data);
 	archive_read_support_format_all(data);
+#if HAVE_ARCHIVE_READ_SUPPORT_FORMAT_RAW
 	archive_read_support_format_raw(data);
+#endif
 	int error =0;
 	switch(_self->type){
 		case archive_path:
@@ -433,23 +480,20 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 		_self->type = archive_fd;
 		rb_scan_args(argc, argv, "21", &path,&r_format,&r_filter);
 	}else if(rb_respond_to(path,rb_intern("read"))){
-		_self->ruby = path;
 		_self->type = archive_ruby;
 		rb_scan_args(argc, argv, "21", &path,&r_format,&r_filter);
 	}else{
 		path = rb_file_s_expand_path(1,&path);
-		_self->path = std::string(rb_string_value_cstr(&path));
+		_self->path = std::string(StringValueCStr(path));
 		_self->type =archive_path;
 	}
-	
+	_self->ruby = path;
 	//to set the format the file must convert
 	if(!NIL_P(r_format)){
 	
 		//struct archive *a = archive_read_new(),*b=archive_write_new();
 		//struct archive_entry *entry;
 		int format,filter;
-		EntryVector entries;
-		BuffVector allbuff;
 		
 		if(SYMBOL_P(r_format)){
 			SymToIntType::iterator it = SymToFormat.find(SYM2ID(r_format));
@@ -535,11 +579,7 @@ VALUE Archive_each_block(struct archive *data)
 	return Qnil;
 }
 
-/*//		while(archive_read_data_block(a, &p, &size, &offset) == ARCHIVE_OK)
-//		{
-//			std::cout << offset << std::endl;
-//			archive_write_data(b,p,size);
-//		}
+/*
  * call-seq:
  *   each(){|entry [, data]| ... } → self
  *   each()                        → an_enumerator
@@ -700,13 +740,13 @@ VALUE Archive_to_hash(VALUE self)
 }
 
 VALUE Archive_map_block(struct write_obj * data){
-	for(unsigned int i=0; i< data->entries->size(); i++){
-		VALUE temp = wrap(data->entries->at(i));
+	for(unsigned int i=0; i< data->data->size(); i++){
+		VALUE temp = wrap(data->data->at(i).first);
 		VALUE val;
 		if(rb_proc_arity(rb_block_proc())<2){
 			val = rb_yield(temp);
 		}else{
-			val = rb_yield_values(2,temp,rb_str_new2(data->allbuff->at(i).c_str()));
+			val = rb_yield_values(2,temp,wrap_data(data->data->at(i).second));
 		}
 		VALUE entry,rdata= Qnil;
 		if(rb_obj_is_kind_of(val,rb_cArray)){
@@ -717,11 +757,12 @@ VALUE Archive_map_block(struct write_obj * data){
 		if(rb_obj_is_kind_of(entry,rb_cArchiveEntry)){
 			archive_write_header(data->archive,wrap<struct archive_entry *>(val));
 			
-			if(rdata == Qnil)
-				archive_write_data(data->archive,data->allbuff->at(i).c_str(),data->allbuff->at(i).length());
-			else{
-				char* buff = StringValueCStr(rdata);
-				archive_write_data(data->archive,buff,strlen(buff));
+			if(rdata == Qnil){
+				std::string &buff = data->data->at(i).second;
+				archive_write_data(data->archive,&buff[0],buff.length());
+			}else{
+				//char* buff = StringValueCStr(rdata);
+				archive_write_data(data->archive,RSTRING_PTR(rdata),RSTRING_LEN(rdata));
 			}
 			archive_write_finish_entry(data->archive);
 		}else if(entry==Qnil){
@@ -761,20 +802,18 @@ VALUE Archive_map_self(VALUE self)
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	int format = ARCHIVE_FORMAT_EMPTY;
 	
-	EntryVector entries;
-	BuffVector buffs;
+	DataVector entries;
 	IntVector filters;
 	
 	//autodetect format and filters
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		
-		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+		RubyArchive::read_old_data(a,entries, format, filters);
 
 		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 			write_obj obj;
 			obj.archive = b;
-			obj.entries = &entries;
-			obj.allbuff = &buffs;
+			obj.data = &entries;
 			RB_ENSURE(Archive_map_block,&obj,Archive_write_block_ensure,b);
 		}	
 	}	
@@ -819,11 +858,11 @@ VALUE Archive_get(VALUE self,VALUE val)
 
 void extract_extract(struct archive *a,struct archive_entry *entry,int extract_opt,VALUE io, int fd)
 {
-	char buff[8192];
-	size_t bytes_read;
 	if(rb_obj_is_kind_of(io,rb_cIO)){
 		archive_read_data_into_fd(a,fd);
 	}else if(rb_respond_to(io,rb_intern("write"))){
+		char buff[8192];
+		size_t bytes_read;
 		while ((bytes_read=archive_read_data(a,&buff,sizeof(buff)))>0)
 			rb_funcall(io,rb_intern("write"),1,rb_str_new(buff,bytes_read));
 	}else
@@ -1010,23 +1049,7 @@ VALUE Archive_format_name(VALUE self)
 			archive_read_finish(a);
 		}
 	}
-	return name ? rb_str_new2(name) : Qnil	;
-}
-
-
-struct archive* create_match_object(VALUE opts)
-{
-	VALUE temp;
-	struct archive* result = archive_match_new();
-	if(rb_obj_is_kind_of(opts,rb_cHash))
-	{
-	if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("uid")))))
-		archive_match_include_uid(result,NUM2INT(temp));
-	if(RTEST(temp=rb_hash_aref(opts,ID2SYM(rb_intern("gid")))))
-		archive_match_include_gid(result,NUM2INT(temp));
-
-	}
-	return result;
+	return name ? rb_str_new2(name) : Qnil;
 }
 
 
@@ -1036,160 +1059,168 @@ struct archive* create_match_object(VALUE opts)
 
 
 
-//key is the entry and val is
 
-//TODO: hier nochmal ein ensure rein damit es das file wieder zu macht?
-int Archive_add_hash_block(VALUE key,VALUE val,struct add_obj *obj){
-	char buff[8192];
-	size_t bytes_read;
-	int fd=-1;
-	obj->file = archive_read_disk_new();
-	archive_read_disk_set_standard_lookup(obj->file);
-	struct archive_entry *entry = archive_entry_new();
-	archive_entry_copy_pathname(entry, rb_string_value_cstr(&key));
-	if(rb_obj_is_kind_of(val,rb_cFile)){
-		VALUE pathname = rb_funcall(val,rb_intern("path"),0); //source path
-		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
-		archive_entry_copy_sourcepath(entry, rb_string_value_cstr(&obj2));
-		fd = NUM2INT(rb_funcall(val,rb_intern("fileno"),0));
-	}else if(rb_obj_is_kind_of(val,rb_cIO)){
-		fd = NUM2INT(rb_funcall(val,rb_intern("fileno"),0));
-	}else if(rb_respond_to(val,rb_intern("read"))){
-		//stringio has neigther path or fileno, so do nothing
-	}else {
-		VALUE obj2 = rb_file_s_expand_path(1,&val);
-		archive_entry_copy_sourcepath(entry, rb_string_value_cstr(&obj2));
-		fd = open(rb_string_value_cstr(&obj2), O_RDONLY);
-		if (fd < 0) //TODO: add error
-		{
-			return 0;
-		}
-	}
-	if(fd > 0)
-		archive_read_disk_entry_from_file(obj->file, entry, fd, NULL);
-	if(rb_block_given_p()){
-		VALUE temp = wrap(entry);
-		VALUE result = rb_yield(temp);
-		if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
-			entry = wrap<archive_entry*>(result);
-		else
-			entry = wrap<archive_entry*>(temp);
-	} 
-	for(unsigned int i = 0;i < obj->entries->size();)
-	{
-		if(std::string(archive_entry_pathname(obj->entries->at(i))).compare(archive_entry_pathname(entry)) == 0){
-			obj->entries->erase(obj->entries->begin()+i);
-			obj->allbuff->erase(obj->allbuff->begin()+i);
-		}else
-			i++;
-	}
-	std::string strbuff;
-	if(fd < 0 and rb_respond_to(val,rb_intern("read"))){
-		VALUE result = rb_funcall(val,rb_intern("read"),0);
-		strbuff.append(rb_string_value_cstr(&result), RSTRING_LEN(result));
-	}else{
-		while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
-			strbuff.append(buff, bytes_read);
-	}
-	obj->entries->push_back(entry);
-	obj->allbuff->push_back(strbuff);
-	if(fd >= 0 and !rb_obj_is_kind_of(val,rb_cIO))
-		close(fd);
-	archive_read_finish(obj->file);
-	return 0;
-}
+
+////key is the entry and val is
+
+////TODO: hier nochmal ein ensure rein damit es das file wieder zu macht?
+//int Archive_add_hash_block(VALUE key,VALUE val,struct add_obj *obj){
+//	char buff[8192];
+//	size_t bytes_read;
+//	int fd=-1;
+//	obj->file = archive_read_disk_new();
+//	archive_read_disk_set_standard_lookup(obj->file);
+//	struct archive_entry *entry = archive_entry_new();
+//	archive_entry_copy_pathname(entry, StringValueCStr(key));
+//	if(rb_obj_is_kind_of(val,rb_cFile)){
+//		VALUE pathname = rb_funcall(val,rb_intern("path"),0); //source path
+//		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
+//		archive_entry_copy_sourcepath(entry, StringValueCStr(obj2));
+//		fd = NUM2INT(rb_funcall(val,rb_intern("fileno"),0));
+//	}else if(rb_obj_is_kind_of(val,rb_cIO)){
+//		fd = NUM2INT(rb_funcall(val,rb_intern("fileno"),0));
+//	}else if(rb_respond_to(val,rb_intern("read"))){
+//		//stringio has neigther path or fileno, so do nothing
+//	}else {
+//		VALUE obj2 = rb_file_s_expand_path(1,&val);
+//		archive_entry_copy_sourcepath(entry, StringValueCStr(obj2));
+//		fd = open(StringValueCStr(obj2), O_RDONLY);
+//		if (fd < 0) //TODO: add error
+//		{
+//			return 0;
+//		}
+//	}
+//	if(fd > 0)
+//		archive_read_disk_entry_from_file(obj->file, entry, fd, NULL);
+//	if(rb_block_given_p()){
+//		VALUE temp = wrap(entry);
+//		VALUE result = rb_yield(temp);
+//		if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
+//			entry = wrap<archive_entry*>(result);
+//		else
+//			entry = wrap<archive_entry*>(temp);
+//	} 
+//	for(unsigned int i = 0;i < obj->entries->size();)
+//	{
+//		if(std::string(archive_entry_pathname(obj->entries->at(i))).compare(archive_entry_pathname(entry)) == 0){
+//			obj->entries->erase(obj->entries->begin()+i);
+//			obj->allbuff->erase(obj->allbuff->begin()+i);
+//		}else
+//			i++;
+//	}
+//	std::string strbuff;
+//	if(fd < 0 and rb_respond_to(val,rb_intern("read"))){
+//		VALUE result = rb_funcall(val,rb_intern("read"),0);
+//		strbuff.append(StringValueCStr(result), RSTRING_LEN(result));
+//	}else{
+//		while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
+//			strbuff.append(buff, bytes_read);
+//	}
+//	obj->entries->push_back(entry);
+//	obj->allbuff->push_back(strbuff);
+//	if(fd >= 0 and !rb_obj_is_kind_of(val,rb_cIO))
+//		close(fd);
+//	archive_read_finish(obj->file);
+//	return 0;
+//}
+
+//VALUE Archive_add_block(struct add_obj *obj )
+//{
+//	VALUE robj = obj->obj;
+//	char buff[8192];
+//	size_t bytes_read;
+//	archive_read_disk_set_standard_lookup(obj->file);
+//	if(rb_obj_is_kind_of(robj,rb_cArray)){
+//		for(int i=0;i< RARRAY_LEN(robj);i++){
+//			VALUE temp = RARRAY_PTR(robj)[i];
+//			int fd = -1;
+//			char *sourcepath,*pathname;
+//			if(rb_obj_is_kind_of(temp,rb_cFile)){
+//				VALUE rpath = rb_funcall(temp,rb_intern("path"),0); //source path
+//				pathname = StringValueCStr(rpath);
+//				VALUE obj2 = rb_file_s_expand_path(1,&rpath);
+//				sourcepath = StringValueCStr(obj2);
+//				fd = NUM2INT(rb_funcall(temp,rb_intern("fileno"),0));
+//			}else{
+//				VALUE obj2 = rb_file_s_expand_path(1,&temp);
+//				sourcepath = pathname = StringValueCStr(obj2);
+//				fd = open(pathname, O_RDONLY);
+//				if (fd < 0) //TODO: add error
+//					return Qnil;
+//			}
+//			struct archive_entry *entry = archive_entry_new();
+//			archive_entry_copy_sourcepath(entry, sourcepath);
+//			archive_entry_copy_pathname(entry, pathname);
+//			archive_read_disk_entry_from_file(obj->file, entry, fd, NULL);
+//			if(rb_block_given_p()){
+//				VALUE temp = wrap(entry);
+//				VALUE result = rb_yield(temp);
+//				if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
+//					entry = wrap<archive_entry*>(result);
+//				else
+//					entry = wrap<archive_entry*>(temp);
+//			}
+//			std::string strbuff;
+//			while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
+//				strbuff.append(buff, bytes_read);
+//			if(fd >= 0 and !rb_obj_is_kind_of(robj,rb_cIO))
+//				close(fd);
+//			obj->entries->push_back(entry);
+//			obj->allbuff->push_back(strbuff);
+//		}
+//	}else if(rb_obj_is_kind_of(robj,rb_cHash)){
+//		archive_read_finish(obj->file);
+//		rb_hash_foreach(robj,(int (*)(...))Archive_add_hash_block,(VALUE)obj);
+//	}else
+//	{
+//		if(obj->fd > 0)
+//			archive_read_disk_entry_from_file(obj->file, obj->entry, obj->fd, NULL);
+
+//		if(rb_block_given_p()){
+//			VALUE temp = wrap(obj->entry);
+//			VALUE result = rb_yield(temp);
+//			if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
+//				obj->entry = wrap<archive_entry*>(result);
+//			else
+//				obj->entry = wrap<archive_entry*>(temp);
+//		}
+//		for(unsigned int i = 0;i < obj->entries->size();)
+//		{
+//			if(std::string(archive_entry_pathname(obj->entries->at(i))).compare(archive_entry_pathname(obj->entry)) == 0){
+//				obj->entries->erase(obj->entries->begin()+i);
+//				obj->allbuff->erase(obj->allbuff->begin()+i);
+//			}else
+//				i++;
+//		}
+//		std::string strbuff;
+//		if(obj->fd < 0 and rb_respond_to(robj,rb_intern("read"))){
+//			VALUE result = rb_funcall(robj,rb_intern("read"),0);
+//			strbuff.append(StringValueCStr(result), RSTRING_LEN(result));
+//		}else{
+//			while ((bytes_read = read(obj->fd, buff, sizeof(buff))) > 0)
+//				strbuff.append(buff, bytes_read);
+//		}
+//		obj->entries->push_back(obj->entry);
+//		obj->allbuff->push_back(strbuff);
+//	}
+//	return Qnil;
+//}
 
 VALUE Archive_add_block(struct add_obj *obj )
 {
-	VALUE robj = obj->obj;
-	char buff[8192];
-	size_t bytes_read;
-	archive_read_disk_set_standard_lookup(obj->file);
-	if(rb_obj_is_kind_of(robj,rb_cArray)){
-		for(int i=0;i< RARRAY_LEN(robj);i++){
-			VALUE temp = RARRAY_PTR(robj)[i];
-			int fd = -1;
-			char *sourcepath,*pathname;
-			if(rb_obj_is_kind_of(temp,rb_cFile)){
-				VALUE rpath = rb_funcall(temp,rb_intern("path"),0); //source path
-				pathname = rb_string_value_cstr(&rpath);
-				VALUE obj2 = rb_file_s_expand_path(1,&rpath);
-				sourcepath = rb_string_value_cstr(&obj2);
-				fd = NUM2INT(rb_funcall(temp,rb_intern("fileno"),0));
-			}else{
-				VALUE obj2 = rb_file_s_expand_path(1,&temp);
-				sourcepath = pathname = rb_string_value_cstr(&obj2);
-				fd = open(pathname, O_RDONLY);
-				if (fd < 0) //TODO: add error
-					return Qnil;
-			}
-			struct archive_entry *entry = archive_entry_new();
-			archive_entry_copy_sourcepath(entry, sourcepath);
-			archive_entry_copy_pathname(entry, pathname);
-			archive_read_disk_entry_from_file(obj->file, entry, fd, NULL);
-			if(rb_block_given_p()){
-				VALUE temp = wrap(entry);
-				VALUE result = rb_yield(temp);
-				if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
-					entry = wrap<archive_entry*>(result);
-				else
-					entry = wrap<archive_entry*>(temp);
-			}
-			std::string strbuff;
-			while ((bytes_read = read(fd, buff, sizeof(buff))) > 0)
-				strbuff.append(buff, bytes_read);
-			if(fd >= 0 and !rb_obj_is_kind_of(robj,rb_cIO))
-				close(fd);
-			obj->entries->push_back(entry);
-			obj->allbuff->push_back(strbuff);
-		}
-	}else if(rb_obj_is_kind_of(robj,rb_cHash)){
-		archive_read_finish(obj->file);
-		rb_hash_foreach(robj,(int (*)(...))Archive_add_hash_block,(VALUE)obj);
-	}else
-	{
-		if(obj->fd > 0)
-			archive_read_disk_entry_from_file(obj->file, obj->entry, obj->fd, NULL);
-
-		if(rb_block_given_p()){
-			VALUE temp = wrap(obj->entry);
-			VALUE result = rb_yield(temp);
-			if(rb_obj_is_kind_of(result,rb_cArchiveEntry))
-				obj->entry = wrap<archive_entry*>(result);
-			else
-				obj->entry = wrap<archive_entry*>(temp);
-		}
-		for(unsigned int i = 0;i < obj->entries->size();)
-		{
-			if(std::string(archive_entry_pathname(obj->entries->at(i))).compare(archive_entry_pathname(obj->entry)) == 0){
-				obj->entries->erase(obj->entries->begin()+i);
-				obj->allbuff->erase(obj->allbuff->begin()+i);
-			}else
-				i++;
-		}
-		std::string strbuff;
-		if(obj->fd < 0 and rb_respond_to(robj,rb_intern("read"))){
-			VALUE result = rb_funcall(robj,rb_intern("read"),0);
-			strbuff.append(rb_string_value_cstr(&result), RSTRING_LEN(result));
-		}else{
-			while ((bytes_read = read(obj->fd, buff, sizeof(buff))) > 0)
-				strbuff.append(buff, bytes_read);
-		}
-		obj->entries->push_back(obj->entry);
-		obj->allbuff->push_back(strbuff);
-	}
+	RubyArchive::read_data_from_path2(obj->obj,Qnil,*obj->data);
 	return Qnil;
 }
 
 VALUE Archive_add_block_ensure(struct add_obj *obj )
 {
-	if(!rb_obj_is_kind_of(obj->obj,rb_cHash))
-		archive_read_finish(obj->file);
+//	if(!rb_obj_is_kind_of(obj->obj,rb_cHash))
+//		archive_read_finish(obj->file);
 		
-	size_t size = obj->entries->size();
+	size_t size = obj->data->size();
 	for(unsigned int i=0; i<size; i++){
-		archive_write_header(obj->archive,obj->entries->at(i));
-		archive_write_data(obj->archive,obj->allbuff->at(i).c_str(),obj->allbuff->at(i).length());
+		archive_write_header(obj->archive,obj->data->at(i).first);
+		archive_write_data(obj->archive,&obj->data->at(i).second[0],obj->data->at(i).second.length());
 		archive_write_finish_entry(obj->archive);
 	}
 	archive_write_finish(obj->archive);
@@ -1231,44 +1262,41 @@ VALUE Archive_add(int argc, VALUE *argv, VALUE self)//(VALUE self,VALUE obj,VALU
 		else
 			name = obj;
 	}
-	char *path = NULL;
 
 	struct archive *a = archive_read_new(),*b=archive_write_new();
-	struct archive_entry *entry;
-
-	EntryVector entries;
-	BuffVector buffs;
+	
+	DataVector entries;
 	IntVector filters;
 	
 
-	int format= ARCHIVE_FORMAT_EMPTY,fd=-1;
+	int format= ARCHIVE_FORMAT_EMPTY;
 
 	
 	//autodetect format and compression
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
-		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+		RubyArchive::read_old_data(a, entries, format, filters);
 	}
 	
-	if(rb_obj_is_kind_of(obj,rb_cFile)){
-		VALUE pathname = rb_funcall(obj,rb_intern("path"),0); //source path
-		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
-		path = rb_string_value_cstr(&obj2);
-		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
-	}else if(rb_obj_is_kind_of(obj,rb_cIO)){
-		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
-	}else if(rb_respond_to(obj,rb_intern("read")) or rb_obj_is_kind_of(obj,rb_cArray) or rb_obj_is_kind_of(obj,rb_cHash)){
-		//stringio has neigther path or fileno, so do nothing
-	}else {
-		if(RTEST(rb_funcall(rb_cFile,rb_intern("directory?"),1,obj)))
-			obj = rb_funcall(rb_cDir,rb_intern("glob"),1,rb_str_new2("**/**/*"));
-		else{
-			VALUE obj2 = rb_file_s_expand_path(1,&obj);
-			path = rb_string_value_cstr(&obj2);
-			fd = open(path, O_RDONLY);
-			if (fd < 0) //TODO: add error
-				return self;
-		}
-	}
+//	if(rb_obj_is_kind_of(obj,rb_cFile)){
+//		VALUE pathname = rb_funcall(obj,rb_intern("path"),0); //source path
+//		VALUE obj2 = rb_file_s_expand_path(1,&pathname);
+//		path = StringValueCStr(obj2);
+//		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
+//	}else if(rb_obj_is_kind_of(obj,rb_cIO)){
+//		fd = NUM2INT(rb_funcall(obj,rb_intern("fileno"),0));
+//	}else if(rb_respond_to(obj,rb_intern("read")) or rb_obj_is_kind_of(obj,rb_cArray) or rb_obj_is_kind_of(obj,rb_cHash)){
+//		//stringio has neigther path or fileno, so do nothing
+//	}else {
+//		if(RTEST(rb_funcall(rb_cFile,rb_intern("directory?"),1,obj)))
+//			obj = rb_funcall(rb_cDir,rb_intern("glob"),1,rb_str_new2("**/**/*"));
+//		else{
+//			VALUE obj2 = rb_file_s_expand_path(1,&obj);
+//			path = StringValueCStr(obj2);
+//			fd = open(path, O_RDONLY);
+//			if (fd < 0) //TODO: add error
+//				return self;
+//		}
+//	}
 //	Archive_format_from_path(self,format,compression);
 	
 	if(format == ARCHIVE_FORMAT_EMPTY){
@@ -1276,25 +1304,16 @@ VALUE Archive_add(int argc, VALUE *argv, VALUE self)//(VALUE self,VALUE obj,VALU
 	}
 	
 	if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
-		entry = archive_entry_new();
-		if (path)
-			archive_entry_copy_sourcepath(entry, path);
-		if(!NIL_P(name))
-			archive_entry_copy_pathname(entry, rb_string_value_cstr(&name));
 		
 		add_obj temp;
 		temp.archive = b;
-		temp.file = archive_read_disk_new();
-		temp.entry = entry;
-		temp.fd = fd;
 		temp.obj = obj;
-		temp.entries = &entries;
-		temp.allbuff = &buffs;
+		//temp.path = path;
+		temp.name = name;
+		temp.data = &entries;
 		RB_ENSURE(Archive_add_block,&temp,Archive_add_block_ensure,&temp);
 	}
 	
-	if(fd >= 0 and !rb_obj_is_kind_of(name,rb_cIO))
-		close(fd);
 	return self;
 }
 
@@ -1335,21 +1354,19 @@ VALUE Archive_delete(VALUE self,VALUE val)
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	int format = ARCHIVE_FORMAT_EMPTY;
 	
-	EntryVector entries;
-	BuffVector buffs;
+	DataVector entries;
 	IntVector filters;
 	
 	VALUE result = rb_ary_new();
 	
 	//autodetect format and compression
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
-		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+		RubyArchive::read_old_data(a, entries, format, filters);
 
 		for(unsigned int i=0; i<entries.size();){
-			if(RubyArchive::match_entry(entries[i],val)){
-				rb_ary_push(result,rb_str_new2(archive_entry_pathname(entries[i])));
+			if(RubyArchive::match_entry(entries[i].first,val)){
+				rb_ary_push(result,rb_str_new2(archive_entry_pathname(entries[i].first)));
 				entries.erase(entries.begin() + i);
-				buffs.erase(buffs.begin() + i);
 			}else
 				++i;
 		}
@@ -1357,8 +1374,8 @@ VALUE Archive_delete(VALUE self,VALUE val)
 		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 			//write old data back
 			for(unsigned int i=0; i<entries.size(); i++){
-				archive_write_header(b,entries[i]);
-				archive_write_data(b,buffs[i].c_str(),buffs[i].length());
+				archive_write_header(b,entries[i].first);
+				archive_write_data(b,&entries[i].second[0],entries[i].second.length());
 				archive_write_finish_entry(b);
 			}
 			archive_write_finish(b);
@@ -1371,13 +1388,13 @@ VALUE Archive_delete(VALUE self,VALUE val)
 VALUE Archive_delete_if_block(struct write_obj * data)
 {
 	VALUE result= rb_ary_new();
-	for(unsigned int i=0; i< data->entries->size(); i++){
-		if(!RTEST(rb_yield(wrap(data->entries->at(i))))){
-			archive_write_header(data->archive,data->entries->at(i));
-			archive_write_data(data->archive,data->allbuff->at(i).c_str(),data->allbuff->at(i).length());
+	for(unsigned int i=0; i< data->data->size(); i++){
+		if(!RTEST(rb_yield(wrap(data->data->at(i).first)))){
+			archive_write_header(data->archive,data->data->at(i).first);
+			archive_write_data(data->archive,&data->data->at(i).second[0],data->data->at(i).second.length());
 			archive_write_finish_entry(data->archive);
 		}else
-			rb_ary_push(result,wrap(data->entries->at(i)));
+			rb_ary_push(result,wrap(data->data->at(i).first));
 	}
 	return result;
 }
@@ -1404,18 +1421,16 @@ VALUE Archive_delete_if(VALUE self)
 	struct archive *a = archive_read_new(),*b=archive_write_new();
 	int format = ARCHIVE_FORMAT_EMPTY;
 	
-	EntryVector entries;
-	BuffVector buffs;
+	DataVector entries;
 	IntVector filters;
 	
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
-		RubyArchive::read_old_data(a,entries,buffs, format, filters);
+		RubyArchive::read_old_data(a, entries, format, filters);
 		
 		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK){
 			write_obj obj;
 			obj.archive = b;
-			obj.entries = &entries;
-			obj.allbuff = &buffs;
+			obj.data = &entries;
 			return RB_ENSURE(Archive_delete_if_block,&obj,Archive_write_block_ensure,b);
 		}	
 	}	
@@ -1699,12 +1714,28 @@ extern "C" void Init_archive(void){
 	SymToFormat[rb_intern("zip")]=ARCHIVE_FORMAT_ZIP;
 	SymToFormat[rb_intern("ar")]=ARCHIVE_FORMAT_AR_GNU;
 	SymToFormat[rb_intern("xar")]=ARCHIVE_FORMAT_XAR;
+	SymToFormat[rb_intern("lha")]=ARCHIVE_FORMAT_LHA;
+	SymToFormat[rb_intern("cab")]=ARCHIVE_FORMAT_CAB;
+	SymToFormat[rb_intern("rar")]=ARCHIVE_FORMAT_RAR;
+	SymToFormat[rb_intern("7zip")]=ARCHIVE_FORMAT_7ZIP;
+	
 	
 	SymToFilter[rb_intern("gzip")]=ARCHIVE_FILTER_GZIP;
 	SymToFilter[rb_intern("bzip2")]=ARCHIVE_FILTER_BZIP2;
 	SymToFilter[rb_intern("compress")]=ARCHIVE_FILTER_BZIP2;
 	SymToFilter[rb_intern("lzma")]=ARCHIVE_FILTER_LZMA;
 	SymToFilter[rb_intern("xz")]=ARCHIVE_FILTER_XZ;
+	SymToFilter[rb_intern("uu")]=ARCHIVE_FILTER_UU;
+	SymToFilter[rb_intern("rpm")]=ARCHIVE_FILTER_RPM;
+	SymToFilter[rb_intern("lzip")]=ARCHIVE_FILTER_LZIP;
+	
+#ifdef ARCHIVE_FILTER_LZOP
+	SymToFilter[rb_intern("lzop")]=ARCHIVE_FILTER_LZOP;
+#endif
+#ifdef ARCHIVE_FILTER_GRZIP
+	SymToFilter[rb_intern("grzip")]=ARCHIVE_FILTER_GRZIP;
+#endif
+
 	
 	FileExtType::mapped_type pair;
 	
@@ -1723,17 +1754,17 @@ extern "C" void Init_archive(void){
 	
 	fileExt[".tar.lzma"]=std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_LZMA);
 	
-	pair = std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_NONE);
-	fileExt[".tar"]=pair;
+	fileExt[".tar"]=std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_NONE);
 	
 	
-	DataVector data;
-	RubyArchive::read_data_from_path2(rb_str_new2("*.cpp"),data);
-	rb_warn("%lu",data.size());
-//	
-	for(size_t i = 0; i < data.size(); ++i)
-	{
-		rb_warn("%s",archive_entry_pathname(data[i].first));
-		rb_warn("%lu",data[i].second.size());
-	}
+//	DataVector data;
+//	//RubyArchive::read_data_from_path2(rb_reg_new(".",8,0),Qnil,data);
+//	RubyArchive::read_data_from_path2(rb_str_new2("."),Qnil,data);
+//	rb_warn("%lu",data.size());
+////	
+//	for(size_t i = 0; i < data.size(); ++i)
+//	{
+//		rb_warn("%s",archive_entry_pathname(data[i].first));
+//		rb_warn("%lu",data[i].second.size());
+//	}
 }
