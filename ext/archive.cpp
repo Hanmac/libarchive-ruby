@@ -97,13 +97,13 @@ VALUE wrap_data(const std::string &str)
 
 VALUE Archive_read_block_ensure(struct archive * data)
 {
-	archive_read_finish(data);
+	archive_read_close(data);
 	return Qnil;
 }
 
 VALUE Archive_write_block_ensure(struct archive * data)
 {
-	archive_write_finish(data);
+	archive_write_close(data);
 	return Qnil;
 }
 
@@ -175,7 +175,7 @@ void read_old_data(struct archive *a,DataVector &entries, int &format, IntVector
 			entries.push_back(std::make_pair(archive_entry_clone(entry),buff));
 			
 		}
-		archive_read_finish(a);
+		archive_read_close(a);
 }
 
 struct archive* create_match_object(VALUE opts)
@@ -265,6 +265,31 @@ struct read_data_path_obj
 };
 
 
+void read_data_match_callback(struct archive * arch, void *, struct archive_entry *entry)
+{
+//	entry = archive_entry_clone(entry);
+//	if(AE_IFDIR != archive_entry_filetype(entry))
+//	{
+//		rb_warn("%i ",);
+	//rb_warn("%i inclusions",archive_match_path_unmatched_inclusions(arch));
+		rb_warn("%s is excluded",archive_entry_pathname(entry));
+//		rb_warn("%d fflags",archive_entry_filetype(entry));
+//		rb_warn("%d uid",archive_entry_uid(entry));
+		
+//	}else
+//		rb_warn("%s is a DIR!",archive_entry_pathname(entry));
+//	archive_read_disk_descend(arch);
+	
+
+}
+
+int read_data_meta_callback(struct archive *arch, void *, struct archive_entry *entry)
+{
+	if(archive_read_disk_can_descend(arch))
+		archive_read_disk_descend(arch);
+	return 1;
+}
+
 VALUE read_data_from_path_block(struct read_data_path_obj *obj)
 {
 	struct archive_entry *entry = archive_entry_new();
@@ -274,12 +299,13 @@ VALUE read_data_from_path_block(struct read_data_path_obj *obj)
 		const char *cstr = archive_entry_pathname(entry);
 		
 		//allways add subdirs
-		archive_read_disk_descend(obj->archive);
+		//if(archive_read_disk_can_descend(obj->archive))
+		//	archive_read_disk_descend(obj->archive);
 		
-		// add the "." base dir
-		if(strcmp(cstr,".") == 0)
+		// ignore the "." base dir
+		if(strcmp(cstr,".") == 0){
 			continue;
-		
+		}
 		// fist look at the match object
 		if(archive_match_excluded(obj->match,entry))
 			continue;
@@ -329,7 +355,8 @@ void read_data_from_path(struct archive * file,struct archive * match,VALUE rpat
 {
 
 	archive_read_disk_open(file,path);
-	
+	archive_read_disk_set_matching(file,match,read_data_match_callback,NULL);
+	archive_read_disk_set_metadata_filter_callback(file, read_data_meta_callback, NULL);
 	read_data_path_obj obj;
 	obj.archive = file;
 	obj.path = rpath;
@@ -352,6 +379,10 @@ void read_data_from_path2(VALUE path,VALUE opts,DataVector &data)
 	
 	archive_read_disk_set_standard_lookup(file);
 	const char * str = ".";
+	archive_match_include_pattern(match,".");
+	//archive_match_exclude_pattern(match,"*/*/*.cpp");
+	//archive_match_exclude_pattern(match,"*.cpp");
+	//archive_match_include_pattern(match,"*/");
 	
 	if(!rb_obj_is_kind_of(path,rb_cRegexp))
 	{
@@ -523,7 +554,7 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 //		if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 //			while(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 //				if(format==archive_format(a) && filter==archive_filter_code(a,0)){
-//					archive_read_finish(a);
+//					archive_read_close(a);
 //					return self;
 //				}
 //				entries.push_back(archive_entry_clone(entry));
@@ -531,7 +562,7 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 //				
 //				RubyArchive::read_data(a,allbuff.back());
 //			}
-//			archive_read_finish(a);
+//			archive_read_close(a);
 //			if(Archive_write_ruby(self,b,format,IntVector(filter))==ARCHIVE_OK){
 //				//write old data back
 //				for(unsigned int i=0; i<entries.size(); i++){
@@ -539,7 +570,7 @@ VALUE Archive_initialize(int argc, VALUE *argv,VALUE self)
 //					archive_write_data(b,allbuff[i].c_str(),allbuff[i].length());
 //					archive_write_finish_entry(b);
 //				}
-//				archive_write_finish(b);
+//				archive_write_close(b);
 //			}
 //		}
 	}
@@ -734,7 +765,7 @@ VALUE Archive_to_hash(VALUE self)
 			RubyArchive::read_data(a,str);
 			rb_hash_aset(result,wrap(entry),wrap_data(str));
 		}
-		archive_read_finish(a);
+		archive_read_close(a);
 	}
 	return result;
 }
@@ -846,11 +877,11 @@ VALUE Archive_get(VALUE self,VALUE val)
 		while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
 			if(RubyArchive::match_entry(entry,val)){
 				VALUE result = wrap(entry);
-				archive_read_finish(a);
+				archive_read_close(a);
 				return result;
 			}
 		}
-		archive_read_finish(a);
+		archive_read_close(a);
 	}
 	return Qnil;
 }
@@ -945,7 +976,7 @@ VALUE Archive_extract(int argc, VALUE *argv, VALUE self)
 		}catch (...){
 			rb_raise(rb_eArchiveError,"error:%d:%s",archive_errno(a),archive_error_string(a));
 		}
-		archive_read_finish(a);
+		archive_read_close(a);
 	}
 	return result;
 }
@@ -1021,7 +1052,7 @@ VALUE Archive_format(VALUE self)
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		archive_read_next_header(a, &entry);
 		result = INT2NUM(archive_format(a));
-		archive_read_finish(a);
+		archive_read_close(a);
 	}
 	return result;
 }
@@ -1046,7 +1077,7 @@ VALUE Archive_format_name(VALUE self)
 	if(Archive_read_ruby(self,a)==ARCHIVE_OK){
 		if(archive_read_next_header(a, &entry)==ARCHIVE_OK){
 			name = archive_format_name(a);
-			archive_read_finish(a);
+			archive_read_close(a);
 		}
 	}
 	return name ? rb_str_new2(name) : Qnil;
@@ -1120,7 +1151,7 @@ VALUE Archive_format_name(VALUE self)
 //	obj->allbuff->push_back(strbuff);
 //	if(fd >= 0 and !rb_obj_is_kind_of(val,rb_cIO))
 //		close(fd);
-//	archive_read_finish(obj->file);
+//	archive_read_close(obj->file);
 //	return 0;
 //}
 
@@ -1169,7 +1200,7 @@ VALUE Archive_format_name(VALUE self)
 //			obj->allbuff->push_back(strbuff);
 //		}
 //	}else if(rb_obj_is_kind_of(robj,rb_cHash)){
-//		archive_read_finish(obj->file);
+//		archive_read_close(obj->file);
 //		rb_hash_foreach(robj,(int (*)(...))Archive_add_hash_block,(VALUE)obj);
 //	}else
 //	{
@@ -1215,7 +1246,7 @@ VALUE Archive_add_block(struct add_obj *obj )
 VALUE Archive_add_block_ensure(struct add_obj *obj )
 {
 //	if(!rb_obj_is_kind_of(obj->obj,rb_cHash))
-//		archive_read_finish(obj->file);
+//		archive_read_close(obj->file);
 		
 	size_t size = obj->data->size();
 	for(unsigned int i=0; i<size; i++){
@@ -1223,7 +1254,7 @@ VALUE Archive_add_block_ensure(struct add_obj *obj )
 		archive_write_data(obj->archive,&obj->data->at(i).second[0],obj->data->at(i).second.length());
 		archive_write_finish_entry(obj->archive);
 	}
-	archive_write_finish(obj->archive);
+	archive_write_close(obj->archive);
 	return Qnil;
 }
 
@@ -1378,7 +1409,7 @@ VALUE Archive_delete(VALUE self,VALUE val)
 				archive_write_data(b,&entries[i].second[0],entries[i].second.length());
 				archive_write_finish_entry(b);
 			}
-			archive_write_finish(b);
+			archive_write_close(b);
 		}
 		
 	}
@@ -1460,10 +1491,10 @@ VALUE Archive_clear(VALUE self)
 		format = archive_format(a);
 		IntVector filters;
 		RubyArchive::read_get_filters(a,filters);
-		archive_read_finish(a);
+		archive_read_close(a);
 		
 		if(Archive_write_ruby(self,b,format,filters)==ARCHIVE_OK)
-			archive_write_finish(b);
+			archive_write_close(b);
 	}
 	
 	return self;
@@ -1757,14 +1788,14 @@ extern "C" void Init_archive(void){
 	fileExt[".tar"]=std::make_pair(ARCHIVE_FORMAT_TAR,ARCHIVE_FILTER_NONE);
 	
 	
-//	DataVector data;
+	DataVector data;
 //	//RubyArchive::read_data_from_path2(rb_reg_new(".",8,0),Qnil,data);
-//	RubyArchive::read_data_from_path2(rb_str_new2("."),Qnil,data);
-//	rb_warn("%lu",data.size());
+	RubyArchive::read_data_from_path2(rb_str_new2("*/*.cpp"),Qnil,data);
+	rb_warn("%lu",data.size());
 ////	
-//	for(size_t i = 0; i < data.size(); ++i)
-//	{
-//		rb_warn("%s",archive_entry_pathname(data[i].first));
-//		rb_warn("%lu",data[i].second.size());
-//	}
+	for(size_t i = 0; i < data.size(); ++i)
+	{
+		rb_warn("%s",archive_entry_pathname(data[i].first));
+		rb_warn("%lu",data[i].second.size());
+	}
 }
