@@ -55,18 +55,18 @@ Then you can use the beautiful rubyish API:
 
 Assuming, you have "myarchive.tar.bz2" in the current directory. 
 
-	a = Archive.new("myarchive.tar.bz2")
-	puts "This archive contains:"
-	a.each{|entry| puts entry}
-	
-	#Archive includes the Enumerable module, making available all that 
-	#nice enumerating functionality: 
-	puts All entries in uppercase are:
-	puts a.map{|entry| entry.path.upcase}.join("\n")
-	
-	#Furthermore, you can even read from the files contained in the 
-	#archive without actually extracting it:
-	a.each{|entry, data| puts "Content of #{entry} is: #{data}"}
+  a = Archive.new("myarchive.tar.bz2")
+  puts "This archive contains:"
+  a.each{|entry| puts entry}
+  
+  #Archive includes the Enumerable module, making available all that 
+  #nice enumerating functionality: 
+  puts All entries in uppercase are:
+  puts a.map{|entry| entry.path.upcase}.join("\n")
+  
+  #Furthermore, you can even read from the files contained in the 
+  #archive without actually extracting it:
+  a.each{|entry, data| puts "Content of #{entry} is: #{data}"}
 
 === Extract an archive
 
