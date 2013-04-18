@@ -57,48 +57,23 @@ struct rarchive_entry{
 };
 
 template <>
-inline VALUE wrap< rarchive >(rarchive *file )
-{
-	return Data_Wrap_Struct(rb_cArchive, NULL, free, file);
-}
+VALUE wrap< rarchive >(rarchive *file );
 
 
 template <>
-inline rarchive* wrap< rarchive* >(const VALUE &vfile)
-{
-	if ( ! rb_obj_is_kind_of(vfile, rb_cArchive) )
-		return NULL;
-	rarchive *file;
-  Data_Get_Struct( vfile, rarchive, file);
-	return file;
-}
-template <>
-inline VALUE wrap< archive_entry >(struct archive_entry *entry )
-{
-	rarchive_entry *temp = new rarchive_entry;
-	//archive_entry other = archive_entry_clone(entry);
-	temp->entry = archive_entry_clone(entry);
-	return Data_Wrap_Struct(rb_cArchiveEntry, NULL, free, temp);
-}
+rarchive* wrap< rarchive* >(const VALUE &vfile);
 
 template <>
-inline archive_entry* wrap< archive_entry* >(const VALUE &vfile)
-{
-	if ( ! rb_obj_is_kind_of(vfile, rb_cArchiveEntry) )
-		return NULL;
-	rarchive_entry  *file;
-  Data_Get_Struct( vfile, rarchive_entry, file);
-	return file->entry;
-}
+VALUE wrap< archive_entry >(struct archive_entry *entry );
+
 template <>
-inline VALUE wrap< const char >(const char *str )
-{
-	return str == NULL? Qnil : rb_str_new2(str);
-}
+archive_entry* wrap< archive_entry* >(const VALUE &vfile);
+
 template <>
-const char* wrap< const char* >(const VALUE &vfile)
-{
-	return NIL_P(vfile) ? NULL : StringValueCStr((volatile VALUE&)vfile);
-}
+VALUE wrap< const char >(const char *str );
+
+template <>
+const char* wrap< const char* >(const VALUE &vfile);
+
 #endif /* __RubyAchiveMain_H__ */
 

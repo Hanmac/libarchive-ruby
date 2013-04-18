@@ -24,9 +24,8 @@ with libarchive-ruby; if not, write to the Free Software Foundation, Inc.,
 require 'mkmf'
 
 
-
 dir_config("archive")
-with_cflags("-x c++"){
+
 	pkg_config("libarchive")
 	unless(find_library("archive","main") && find_header("archive.h"))
 		abort("libarchive dev files")
@@ -42,9 +41,8 @@ with_cflags("-x c++"){
 	have_func("rb_proc_arity","ruby.h")
 	have_func("archive_read_support_format_raw","archive.h")
 
-}
+$CFLAGS += "-x c++ -Wall"
 
-$CFLAGS += " -Wall"
 
 create_header
 
